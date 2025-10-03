@@ -1079,6 +1079,11 @@ def display_admin_page():
             df['หมวดหมู่มาตรฐานสำคัญ'] = df[PSG9_ID_COL].map(PSG9_label_dict).fillna("ไม่จัดอยู่ใน PSG9 Catalog")
         else:
             df['หมวดหมู่มาตรฐานสำคัญ'] = "ไม่สามารถระบุ (PSG9code.xlsx ไม่ได้โหลด)"
+        import re
+        if 'รายละเอียดการเกิด' in df.columns:
+            df['รายละเอียดการเกิด'] = df['รายละเอียดการเกิด'].astype(str).apply(
+                lambda x: re.sub(r'HN\.?\s?\d+', '[HN_REDACTED]', x, flags=re.IGNORECASE)
+            )            
 
         # ---------------- Anonymize: ใช้ฟังก์ชันจาก anonymizer.py ----------------
         ner_model = load_ner_model()
