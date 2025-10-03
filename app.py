@@ -1079,23 +1079,20 @@ def display_admin_page():
             df['หมวดหมู่มาตรฐานสำคัญ'] = df[PSG9_ID_COL].map(PSG9_label_dict).fillna("ไม่จัดอยู่ใน PSG9 Catalog")
         else:
             df['หมวดหมู่มาตรฐานสำคัญ'] = "ไม่สามารถระบุ (PSG9code.xlsx ไม่ได้โหลด)"
-        import re
-        if 'รายละเอียดการเกิด' in df.columns:
-            df['รายละเอียดการเกิด'] = df['รายละเอียดการเกิด'].astype(str).apply(
-                lambda x: re.sub(r'HN\.?\s?\d+', '[HN_REDACTED]', x, flags=re.IGNORECASE)
-            )            
-
-        # ---------------- Anonymize: ใช้ฟังก์ชันจาก anonymizer.py ----------------
+            
+        # 1. ให้โมเดล AI ทำงานกับข้อมูลดั้งเดิมก่อน
         ner_model = load_ner_model()
         df = anonymize_column(df, text_col="รายละเอียดการเกิด", ner_model=ner_model,
                               out_col="รายละเอียดการเกิด_Anonymized")
-
-        # ---------------- บันทึกผล ----------------
-        try:
-            df.to_parquet(PERSISTED_DATA_PATH, index=False)
-            st.success(f"ประมวลผลสำเร็จ! ข้อมูล {len(df)} รายการถูกบันทึกแล้ว")
-        except Exception as e:
-            st.error(f"บันทึกข้อมูลล้มเหลว: {e}")
+        
+        # 2. ใช้ Regex เก็บตก HN จากคอลัมน์ที่ผ่าน AI มาแล้ว เพื่อความแน่นอน
+        if 'รายละเอียดการเกิด_Anonymized' in df.columns:
+            # ปรับปรุง Regex ให้ครอบคลุมมากขึ้นเล็กน้อย (รองรับการเว้นวรรคหลายแบบ)
+            hn_pattern = r'HN\s*\.?\s*\d+'
+            
+            # ทำการแทนที่ในคอลัมน์ผลลัพธ์สุดท้าย
+            df['รายละเอียดการเกิด_Anonymized'] = df['รายละเอียดการเกิด_Anonymized'].astype(str).apply(
+                lambda x: re.sub(hn_pattern, '[HN_REDACTED]', x, flags=re.IGNORECASE)
 
 def display_executive_dashboard():
     # --- 1. สร้าง Sidebar และเมนูเลือกหน้า ---
