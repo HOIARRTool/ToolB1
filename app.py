@@ -1093,7 +1093,7 @@ def display_admin_page():
             # ทำการแทนที่ในคอลัมน์ผลลัพธ์สุดท้าย
             df['รายละเอียดการเกิด_Anonymized'] = df['รายละเอียดการเกิด_Anonymized'].astype(str).apply(
                 lambda x: re.sub(hn_pattern, '[HN_REDACTED]', x, flags=re.IGNORECASE)
-
+            )
 def display_executive_dashboard():
     # --- 1. สร้าง Sidebar และเมนูเลือกหน้า ---
     st.sidebar.markdown(
