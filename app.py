@@ -1094,6 +1094,13 @@ def display_admin_page():
             df['รายละเอียดการเกิด_Anonymized'] = df['รายละเอียดการเกิด_Anonymized'].astype(str).apply(
                 lambda x: re.sub(hn_pattern, '[HN_REDACTED]', x, flags=re.IGNORECASE)
             )
+# ---------------- บันทึกผล ----------------
+    try:
+        df.to_parquet(PERSISTED_DATA_PATH, index=False)
+        st.success(f"ประมวลผลสำเร็จ! ข้อมูล {len(df)} รายการถูกบันทึกแล้ว")
+    except Exception as e:
+        st.error(f"บันทึกข้อมูลล้มเหลว: {e}")
+        
 def display_executive_dashboard():
     # --- 1. สร้าง Sidebar และเมนูเลือกหน้า ---
     st.sidebar.markdown(
