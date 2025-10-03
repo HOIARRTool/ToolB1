@@ -683,7 +683,7 @@ def prioritize_incidents_nb_logit_v2(_df: pd.DataFrame,
     if 'Sentinel code for check' in df_filtered.columns:
         sentinel_df = df_filtered[df_filtered['Sentinel code for check'].isin(sentinel_composite_keys)]
         if not sentinel_df.empty:
-            sentinel_html = sentinel_df[['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด']].to_html(
+            sentinel_html = sentinel_df[['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']].to_html(
                 classes="styled-table",
                 index=False,
                 table_id="sentinel-table"
@@ -1538,7 +1538,7 @@ def display_executive_dashboard():
                                                Sentinel2024_df[['รหัส', 'Impact', 'ชื่ออุบัติการณ์ความเสี่ยง']].rename(
                                                    columns={'ชื่ออุบัติการณ์ความเสี่ยง': 'Sentinel Event Name'}),
                                                on=['รหัส', 'Impact'], how='left')
-                display_sentinel_cols = ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด',
+                display_sentinel_cols = ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized',
                                          'Resulting Actions']
                 if 'Sentinel Event Name' in sentinel_events.columns:
                     display_sentinel_cols.insert(2, 'Sentinel Event Name')
@@ -2155,7 +2155,7 @@ def display_executive_dashboard():
                                 if unresolved_count > 0:
                                     st.dataframe(
                                         psg9_df[psg9_df['Resulting Actions'].astype(str).isin(['None', '', 'nan'])][
-                                            ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด']],
+                                            ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']],
                                         hide_index=True, use_container_width=True, column_config={
                                             "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
                                                                                                format="DD/MM/YYYY")})
@@ -2199,7 +2199,7 @@ def display_executive_dashboard():
                                 if unresolved_count > 0:
                                     st.dataframe(category_df[category_df['Resulting Actions'].astype(str).isin(
                                         ['None', '', 'nan'])][
-                                                     ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด']],
+                                                     ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']],
                                                  hide_index=True, use_container_width=True, column_config={
                                             "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
                                                                                                format="DD/MM/YYYY")})
