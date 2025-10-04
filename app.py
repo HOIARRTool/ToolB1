@@ -2510,6 +2510,7 @@ def display_executive_dashboard():
 
                                 st.dataframe(severity_df[display_cols], use_container_width=True, hide_index=True,
                                              column_config={"Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
+                                                                                                               format="DD/MM/YYYY")})
 
     elif selected_analysis == "Persistence Risk Index":
         st.markdown("<h4 style='color: #001f3f;'>ดัชนีความเสี่ยงเรื้อรัง (Persistence Risk Index)</h4>", unsafe_allow_html=True)
