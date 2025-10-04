@@ -26,6 +26,7 @@ def get_consultation_response(incident_description: str) -> str:
         return "ขออภัยครับ ไลบรารี google.generativeai ไม่ได้ถูกติดตั้ง"
 
     # --- Master Prompt พร้อมฐานข้อมูลความรู้ในตัว (เวอร์ชันอัปเดต) ---
+    master_prompt = f"""
     **บทบาท:**
     คุณคือ "ผู้ช่วย AI ด้านการจัดการความเสี่ยง" (AI Risk Management Assistant) มีหน้าที่ช่วยสรุปข้อมูลและให้ข้อเสนอแนะเบื้องต้น สำหรับการรายงานอุบัติการณ์ไปยังระบบ NRLS & HRMS
     
