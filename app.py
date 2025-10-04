@@ -218,7 +218,7 @@ def create_summary_table_by_category(dataframe, category_column_name):
     summary.index.name = "หมวดหมู่"
     return summary
     
-    def load_data(uploaded_file):
+def load_data(uploaded_file):
     try:
         return pd.read_excel(uploaded_file, engine='openpyxl', keep_default_na=False)
     except Exception as e:
