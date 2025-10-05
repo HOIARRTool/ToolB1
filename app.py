@@ -1,6 +1,7 @@
 # ==============================================================================
 # IMPORT LIBRARIES 
 # ==============================================================================
+from analytics import log_visit, log_button_click
 import streamlit as st
 import os
 st.set_page_config(layout="wide") 
@@ -1254,6 +1255,7 @@ def display_admin_page():
             st.error(f"บันทึกข้อมูลล้มเหลว: {e}")
         
 def display_executive_dashboard():
+    log_visit() 
     # --- 1. สร้าง Sidebar และเมนูเลือกหน้า ---
     st.sidebar.markdown(
         f"""<div style="display: flex; align-items: center; margin-bottom: 1rem;"><img src="{LOGO_URL}" style="height: 32px; margin-right: 10px;"><h2 style="margin: 0; font-size: 1.7rem;"><span class="gradient-text">HOIA-RR Menu</span></h2></div>""",
@@ -1276,19 +1278,25 @@ def display_executive_dashboard():
     # สร้างปุ่มสำหรับเมนูหลัก
     st.sidebar.markdown("---")
     for option in app_functions_list:
-        if st.sidebar.button(option, key=f"btn_{option}",
-                             type="primary" if st.session_state.selected_analysis == option else "secondary",
-                             use_container_width=True):
+        # สร้างปุ่มและเก็บสถานะการกดไว้ในตัวแปร
+        button_clicked = st.sidebar.button(option, key=f"btn_{option}",
+                                         type="primary" if st.session_state.selected_analysis == option else "secondary",
+                                         use_container_width=True)
+        if button_clicked:
+            log_button_click(option) # ✅ บันทึกการคลิก!
             st.session_state.selected_analysis = option
             st.rerun()
-
+    
     # สร้างปุ่มสำหรับหน้าแดชบอร์ด
     st.sidebar.markdown("---")
     st.sidebar.markdown("เลือกส่วนที่ต้องการแสดงผล:")
     for option in dashboard_pages_list:
-        if st.sidebar.button(option, key=f"btn_{option}",
-                             type="primary" if st.session_state.selected_analysis == option else "secondary",
-                             use_container_width=True):
+        # สร้างปุ่มและเก็บสถานะการกดไว้ในตัวแปร
+        button_clicked = st.sidebar.button(option, key=f"btn_{option}",
+                                         type="primary" if st.session_state.selected_analysis == option else "secondary",
+                                         use_container_width=True)
+        if button_clicked:
+            log_button_click(option) # ✅ บันทึกการคลิก!
             st.session_state.selected_analysis = option
             st.rerun()
 
