@@ -3,6 +3,8 @@ import streamlit as st
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
+import os  
+import json 
 
 # --- การตั้งค่าการเชื่อมต่อ ---
 SCOPE = [
@@ -10,20 +12,27 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive.file"
 ]
 
-# ใช้ st.secrets เพื่อความปลอดภัยเมื่อ deploy บน Render
-CREDS_JSON = st.secrets["gcp_service_account"]
-SHEET_NAME = "HOIA-RR-Analytics" # ชื่อ Google Sheet ที่คุณสร้าง
+# อ่านค่า JSON ทั้งหมดจาก Environment Variable ที่เราตั้งบน Render
+GCP_CREDS_STR = os.environ.get("GCP_CREDS_JSON")
+SHEET_NAME = "HRMS-analyzed" # ชื่อ Google Sheet ที่คุณสร้าง
 
 @st.cache_resource
 def get_gspread_client():
     """สร้างและคืน client สำหรับเชื่อมต่อ Google Sheets"""
+    # ตรวจสอบว่ามีตัวแปรนี้อยู่จริงหรือไม่
+    if not GCP_CREDS_STR:
+        # ไม่แสดง error บนหน้าเว็บจริง แต่จะ print ไว้ใน log ของ Render
+        print("CRITICAL ERROR: ไม่พบค่า GCP_CREDS_JSON ใน Environment Variables!")
+        return None
     try:
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(CREDS_JSON, SCOPE)
+        # แปลงข้อความ (string) JSON ที่ยาวๆ ให้กลายเป็น dictionary ที่ Python ใช้ได้
+        creds_dict = json.loads(GCP_CREDS_STR)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
         client = gspread.authorize(creds)
         return client
     except Exception as e:
-        st.error(f"GSpread Connection Error: {e}")
-        return None
+        print(f"GSpread Connection Error: {e}")
+        return None        
 
 def log_to_sheet(sheet_name, data_row: list):
     """ฟังก์ชันกลางสำหรับบันทึกข้อมูลลงชีต"""
