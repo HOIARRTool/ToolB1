@@ -1372,9 +1372,8 @@ def display_executive_dashboard():
                 key="rca_incident_input"
             )
             if st.button("ขอคำปรึกษาจาก AI", type="primary", use_container_width=True):
-                if not incident_description.strip():
-                    st.warning("กรุณาป้อนรายละเอียดอุบัติการณ์ก่อนครับ")
-                else:
+                log_button_click("ขอคำปรึกษาจาก AI") # <-- เพิ่มบรรทัดนี้
+                if incident_description.strip():
                     with st.spinner("AI กำลังวิเคราะห์และให้คำปรึกษา..."):
                         consultation = get_consultation_response(incident_description)
                         st.markdown("---")
@@ -2673,6 +2672,7 @@ def display_executive_dashboard():
         )
 
         if st.button("ค้นหาข้อมูล", type="primary", use_container_width=True):
+            log_button_click("ค้นหาข้อมูล Risk Register") # <-- เพิ่มบรรทัดนี้ (ตั้งชื่อให้ชัดเจนขึ้น)
             if not query.strip():
                 st.warning("กรุณาป้อนรหัสหรือชื่ออุบัติการณ์ที่ต้องการค้นหา")
             else:
