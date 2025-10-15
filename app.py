@@ -1239,9 +1239,8 @@ def display_admin_page():
                               out_col="รายละเอียดการเกิด_Anonymized")
         
         # 2. ใช้ Regex เก็บตก HN จากคอลัมน์ที่ผ่าน AI มาแล้ว เพื่อความแน่นอน
-        if 'รายละเอียดการเกิด_Anonymized' in df.columns:
-            # ปรับปรุง Regex ให้ครอบคลุมมากขึ้นเล็กน้อย (รองรับการเว้นวรรคหลายแบบ)
-            hn_pattern = r'HN\s*\.?\s*\d+'
+        if 'รายละเอียดการเกิด_Anonymized' in df.columns:           
+            hn_pattern = r'HN\s*[:.\-#]?\s*\d+'
             
             # ทำการแทนที่ในคอลัมน์ผลลัพธ์สุดท้าย
             df['รายละเอียดการเกิด_Anonymized'] = df['รายละเอียดการเกิด_Anonymized'].astype(str).apply(
@@ -1478,9 +1477,15 @@ def display_executive_dashboard():
         st.markdown("<h4 style='color: #001f3f;'>สรุปภาพรวมอุบัติการณ์:</h4>", unsafe_allow_html=True)
 
         with st.expander("แสดง/ซ่อน ตารางข้อมูลอุบัติการณ์ทั้งหมด (Full Data Table)"):
-            st.dataframe(df_filtered, hide_index=True, use_container_width=True, column_config={
-                "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด", format="DD/MM/YYYY")
-            })
+            safe_cols = ['Occurrence Date','Incident','Impact','รายละเอียดการเกิด_Anonymized','Resulting Actions']
+            st.dataframe(
+                df_filtered[safe_cols],
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด", format="DD/MM/YYYY")
+                }
+            )
 
         dashboard_expander_cols = ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized', 'Resulting Actions']
         date_format_config = {"Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด", format="DD/MM/YYYY")}
