@@ -1614,13 +1614,18 @@ def display_executive_dashboard():
             df_heat['incident_label'] = df_heat['รหัส'] + " | " + df_heat['ชื่ออุบัติการณ์ความเสี่ยง'].fillna('')
 
             total_counts = df_heat['incident_label'].value_counts().reset_index()
-            total_counts.columns = ['incident_label', 'total_count']
-
-            top_n = st.slider(
-                "เลือกจำนวนอุบัติการณ์ (ตามความถี่) ที่ต้องการแสดงบน Heatmap รวม:",
-                min_value=5, max_value=min(50, len(total_counts)),
-                value=min(20, len(total_counts)), step=5, key="top_n_slider"
-            )
+            total_counts.columns = ['incident_label', 'total_count']            
+            if len(total_counts) <= 1:
+                top_n = 1
+            else:
+                top_n = st.slider(
+                    "เลือกจำนวนอุบัติการณ์ (ตามความถี่) ที่ต้องการแสดงบน Heatmap รวม:",
+                    min_value=1,
+                    max_value=min(50, len(total_counts)),
+                    value=min(20, len(total_counts)),
+                    step=1,
+                    key="top_n_slider"
+                )
             top_incident_labels = total_counts.nlargest(top_n, 'total_count')['incident_label']
             df_heat_filtered_view = df_heat[df_heat['incident_label'].isin(top_incident_labels)]
             try:
@@ -2450,15 +2455,20 @@ def display_executive_dashboard():
 
                     st.markdown("##### กราฟแสดงอุบัติการณ์รุนแรง (ระดับ E-I) ที่พบบ่อย")
                     chart_data = summary_table_code[summary_table_code['รวม E-up'] > 0].copy()
-
                     if chart_data.empty:
                         st.success("ไม่พบอุบัติการณ์รุนแรง (E-I) ในช่วงข้อมูลที่เลือก")
                     else:
-                        top_n_chart = st.slider(
-                            "เลือกจำนวนรหัสที่ต้องการแสดงบนกราฟ:", min_value=1,
-                            max_value=min(30, len(chart_data)), value=min(15, len(chart_data)),
-                            step=1, key="top_n_chart_slider_tab"  # เปลี่ยน key เพื่อไม่ให้ซ้ำกับที่อื่น
-                        )
+                        if len(chart_data) <= 1:
+                            top_n_chart = 1  # ค่าคงที่เมื่อมีได้แค่ 1 รายการ
+                        else:
+                            top_n_chart = st.slider(
+                                "เลือกจำนวนรหัสที่ต้องการแสดงบนกราฟ:",
+                                min_value=1,
+                                max_value=min(30, len(chart_data)),
+                                value=min(15, len(chart_data)),
+                                step=1,
+                                key="top_n_chart_slider_tab"
+                            )
                         top_chart_data = chart_data.nlargest(top_n_chart, 'รวม E-up')
                         fig = px.bar(
                             top_chart_data.sort_values('รวม E-up', ascending=True),
