@@ -1368,7 +1368,7 @@ def display_executive_dashboard():
             st.info("อธิบายรายละเอียดของอุบัติการณ์ที่เกิดขึ้น เพื่อให้ AI ช่วยให้คำปรึกษา")
             incident_description = st.text_area(
                 "กรุณาอธิบายรายละเอียดอุบัติการณ์ที่นี่:",
-                height=150,
+                height=200,
                 placeholder="เช่น ผู้ป่วยหญิงอายุ 65 ปี เป็นโรคเบาหวาน ได้รับยา losartan แต่เกิดผื่นขึ้นทั่วตัว...",
                 key="rca_incident_input"
             )
