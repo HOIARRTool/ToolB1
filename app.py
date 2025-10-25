@@ -27,12 +27,21 @@ try:
 except ImportError:
     genai = None
 from risk_register_assistant import get_risk_register_consultation
-DEFAULT_CSV_URL = "https://raw.githubusercontent.com/HOIARRTool/ToolB1/main/Validate.csv"
-# ===================== DEFAULT & HELPERS (วางด้านบนไฟล์) =====================
-DEFAULT_CSV_URL = st.secrets.get(
-    "DEFAULT_CSV_URL",
-    "https://raw.githubusercontent.com/HOIARRTool/ToolB1/main/Validate.csv"
-)
+
+def _safe_get_default_csv_url() -> str:
+    # 1) ลองอ่านจาก secrets ถ้ามีไฟล์
+    try:
+        return st.secrets["DEFAULT_CSV_URL"]  # ถ้าไม่มีไฟล์/คีย์จะโยน exception
+    except Exception:
+        pass
+    # 2) ลองจาก ENV
+    env_val = os.environ.get("DEFAULT_CSV_URL")
+    if env_val:
+        return env_val
+    # 3) ค่าดีฟอลต์ (RAW URL)
+    return "https://raw.githubusercontent.com/HOIARRTool/ToolB1/main/Validate.csv"
+
+DEFAULT_CSV_URL = _safe_get_default_csv_url()
 
 def load_csv_from_url_fallback(url: str) -> pd.DataFrame:
     """
