@@ -28,6 +28,141 @@ except ImportError:
     genai = None
 from risk_register_assistant import get_risk_register_consultation
 DEFAULT_CSV_URL = "https://raw.githubusercontent.com/HOIARRTool/ToolB1/main/Validate.csv"
+# ===================== DEFAULT & HELPERS (วางด้านบนไฟล์) =====================
+DEFAULT_CSV_URL = st.secrets.get(
+    "DEFAULT_CSV_URL",
+    "https://raw.githubusercontent.com/HOIARRTool/ToolB1/main/Validate.csv"
+)
+
+def load_csv_from_url_fallback(url: str) -> pd.DataFrame:
+    """
+    โหลด CSV จาก GitHub (ต้องเป็นลิงก์ RAW) และกันกรณีได้ HTML/ว่าง/รูปแบบเพี้ยน
+    """
+    try:
+        df = pd.read_csv(url, keep_default_na=False, encoding='utf-8-sig')
+        # กันกรณีเผลอใช้ลิงก์ blob แล้วได้ HTML แทน CSV
+        if df.shape[1] == 1 and df.columns[0].startswith("<!DOCTYPE"):
+            st.error("URL ที่ให้เป็นหน้า HTML (น่าจะเป็นลิงก์แบบ blob/) กรุณาใช้ลิงก์แบบ raw.githubusercontent.com")
+            return pd.DataFrame()
+        return df
+    except Exception as e:
+        st.error(f"โหลด CSV จาก GitHub ไม่สำเร็จ: {e}")
+        return pd.DataFrame()
+
+def process_incident_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    เอา logic ‘จัดรูปคอลัมน์/คำนวณ field’ ที่คุณใช้ใน display_admin_page เดิม มาใส่ฟังก์ชันกลาง
+    เพื่อลดซ้ำและให้ fallback ใช้เส้นทางเดียวกันกับ upload
+    """
+    if df_raw.empty:
+        return pd.DataFrame()
+
+    df = df_raw.copy()
+    df.columns = [c.strip() for c in df.columns]
+
+    # -------- ตรวจคอลัมน์จำเป็น --------
+    required_source_cols = ["รหัส: เรื่องอุบัติการณ์", "วันที่เกิดอุบัติการณ์", "ความรุนแรง"]
+    missing_source_cols = [c for c in required_source_cols if c not in df.columns]
+    if missing_source_cols:
+        st.error(f"ไม่พบคอลัมน์จำเป็น: {', '.join(missing_source_cols)}")
+        return pd.DataFrame()
+
+    # -------- จัดรูปคอลัมน์หลัก --------
+    df.rename(columns={"วันที่เกิดอุบัติการณ์": "Occurrence Date", "ความรุนแรง": "Impact"}, inplace=True)
+
+    df['Incident'] = df['รหัส: เรื่องอุบัติการณ์'].astype(str).str.split(':', n=1).str[0].str.strip()
+    df = df[df['Incident'] != ''].copy()
+    if df.empty:
+        st.error("ไม่พบ Incident code ที่ถูกต้องหลังกรอง")
+        return pd.DataFrame()
+
+    df['ชื่ออุบัติการณ์ความเสี่ยง'] = df['รหัส: เรื่องอุบัติการณ์'].astype(str).str.split(':', n=1).str[1].str.strip()
+    df['รหัส'] = df['Incident'].astype(str).str.slice(0, 6).str.strip()
+
+    if 'สถานะ' in df.columns:
+        df['Resulting Actions'] = df['สถานะ'].apply(lambda x: 'None' if 'รอแก้ไข' in str(x) else str(x))
+    else:
+        df['Resulting Actions'] = 'N/A'
+
+    df.replace('', 'None', inplace=True)
+    df = df.fillna('None')
+    df['Impact'] = df['Impact'].astype(str).str.strip()
+
+    # -------- เติม กลุ่ม/หมวด (อาศัย df2 ที่คุณสร้างไว้แล้วด้านบน) --------
+    if 'df2' in globals() and not df2.empty:
+        df = pd.merge(df, df2[['รหัส', 'กลุ่ม', 'หมวด']], on='รหัส', how='left')
+    for col in ['กลุ่ม', 'หมวด']:
+        if col not in df.columns:
+            df[col] = 'N/A'
+        else:
+            df[col].fillna('N/A', inplace=True)
+
+    # -------- วันที่ --------
+    df['Occurrence Date'] = pd.to_datetime(df['Occurrence Date'], dayfirst=True, errors='coerce')
+    df.dropna(subset=['Occurrence Date'], inplace=True)
+    if df.empty:
+        st.error("ไม่มีแถวที่วันที่ถูกต้อง")
+        return pd.DataFrame()
+
+    # -------- Impact/Frequency/Risk --------
+    impact_level_map = {('A', 'B', '1'): '1', ('C', 'D', '2'): '2', ('E', 'F', '3'): '3', ('G', 'H', '4'): '4', ('I', '5'): '5'}
+    def map_impact_level_func(val):
+        s = str(val)
+        for k, v in impact_level_map.items():
+            if s in k:
+                return v
+        return 'N/A'
+    df['Impact Level'] = df['Impact'].apply(map_impact_level_func)
+
+    max_p, min_p = df['Occurrence Date'].max().to_period('M'), df['Occurrence Date'].min().to_period('M')
+    total_month_calc = max(1, (max_p.year - min_p.year) * 12 + (max_p.month - min_p.month) + 1)
+
+    counts = df['Incident'].value_counts()
+    df['count'] = df['Incident'].map(counts)
+    df['Incident Rate/mth'] = (df['count'] / total_month_calc).round(1)
+
+    cond = [(df['Incident Rate/mth'] < 2.0), (df['Incident Rate/mth'] < 3.9),
+            (df['Incident Rate/mth'] < 6.9), (df['Incident Rate/mth'] < 29.9)]
+    choice = ['1', '2', '3', '4']
+    df['Frequency Level'] = np.select(cond, choice, default='5')
+
+    df['Risk Level'] = df.apply(
+        lambda r: f"{r['Impact Level']}{r['Frequency Level']}" if r['Impact Level'] != 'N/A' else 'N/A', axis=1
+    )
+    df = pd.merge(df, risk_color_df, on='Risk Level', how='left')
+    df['Category Color'].fillna('Undefined', inplace=True)
+
+    df['Incident Type'] = df['Incident'].astype(str).str[:3]
+    df['Month'] = df['Occurrence Date'].dt.month
+    df['เดือน'] = df['Month'].map(month_label)
+    df['Year'] = df['Occurrence Date'].dt.year.astype(str)
+
+    # -------- PSG9 --------
+    PSG9_ID_COL = 'PSG_ID'
+    if 'PSG9code_df_master' in globals() and not PSG9code_df_master.empty and PSG9_ID_COL in PSG9code_df_master.columns:
+        mm = PSG9code_df_master[['รหัส', PSG9_ID_COL]].drop_duplicates(subset=['รหัส']).copy()
+        mm['รหัส'] = mm['รหัส'].astype(str).str.strip()
+        df = pd.merge(df, mm, on='รหัส', how='left')
+        df['หมวดหมู่มาตรฐานสำคัญ'] = df[PSG9_ID_COL].map(PSG9_label_dict).fillna("ไม่จัดอยู่ใน PSG9 Catalog")
+    else:
+        df['หมวดหมู่มาตรฐานสำคัญ'] = "ไม่สามารถระบุ (PSG9code.xlsx ไม่ได้โหลด)"
+
+    # -------- Anonymize --------
+    ner_model = load_ner_model()
+    df = anonymize_column(df, text_col="รายละเอียดการเกิด", ner_model=ner_model, out_col="รายละเอียดการเกิด_Anonymized")
+    if 'รายละเอียดการเกิด_Anonymized' in df.columns:
+        df['รายละเอียดการเกิด_Anonymized'] = df['รายละเอียดการเกิด_Anonymized'].astype(str).apply(
+            lambda x: re.sub(r'HN\s*[:.\-#]?\s*\d+', '[HN_REDACTED]', x, flags=re.IGNORECASE)
+        )
+    return df
+
+def save_processed(df: pd.DataFrame, note: str = ""):
+    try:
+        df.to_parquet(PERSISTED_DATA_PATH, index=False)
+        st.success(f"บันทึกข้อมูลสำเร็จ ({len(df):,} แถว) {note}")
+    except Exception as e:
+        st.error(f"บันทึกข้อมูลล้มเหลว: {e}")
+
 # ==============================================================================
 # --- 1. การตั้งค่าและตัวแปรหลัก ---
 # ==============================================================================
@@ -1101,7 +1236,7 @@ def display_user_guide():
 # ======================================================================
 # DEFAULT CSV (fallback) จาก GitHub (ใช้เมื่อยังไม่มีการอัปโหลดใหม่)
 # ======================================================================
-DEFAULT_CSV_URL = "https://github.com/HOIARRTool/ToolB1/blob/main/Validate.csv"
+DEFAULT_CSV_URL = "https://raw.githubusercontent.com/HOIARRTool/ToolB1/main/Validate.csv"
 
 def _to_raw_github_url(url: str) -> str:
     """
@@ -1251,40 +1386,69 @@ def display_admin_page():
     st.title("🔑 Admin: Data Upload")
     st.header("อัปโหลดไฟล์รายงานอุบัติการณ์ (.csv)")
 
-    # คำแนะนำ + แจ้ง fallback อัตโนมัติ
     st.markdown("""
     <div style="font-size:16px">
       <ul>
         <li>เข้าสู่ระบบ <b>HRMS</b> ด้วยสิทธิ์ <b>Admin</b></li>
-        <li>ไปที่เมนู <b>‘รายงาน’</b> &gt; <b>‘การส่งออกข้อมูลรายงานอุบัติการณ์ขององค์กร (Excel File)’</b></li>
+        <li>ไปที่เมนู <b>‘รายงาน’</b> > <b>‘การส่งออกข้อมูลรายงานอุบัติการณ์ขององค์กร (Excel File)’</b></li>
         <li>บันทึกเป็น <b>CSV UTF-8</b> แล้วอัปโหลดด้านล่าง</li>
-        <li>✅ ถ้ายังไม่อัปโหลด ระบบจะใช้ไฟล์สำรองจาก GitHub (<code>Validate.csv</code>) ให้อัตโนมัติ</li>
+        <li>✅ ถ้าไม่อัปโหลด สามารถกดปุ่ม <i>ใช้ไฟล์จาก GitHub</i> เพื่อดึง <code>Validate.csv</code> (RAW) มาใช้</li>
       </ul>
     </div>
     """, unsafe_allow_html=True)
 
-    uploaded_file = st.file_uploader("เลือกไฟล์ของคุณที่นี่:", type=[".csv"])
+    c1, c2, c3 = st.columns([1.2, 1, 1])
+    with c1:
+        uploaded_file = st.file_uploader("เลือกไฟล์ของคุณที่นี่ (.csv)", type=[".csv"])
+    with c2:
+        use_github = st.button("⬇️ ใช้ไฟล์จาก GitHub (Validate.csv)")
+    with c3:
+        reset_cache = st.button("🧹 ล้างข้อมูลที่บันทึกไว้")
 
-    # ---------------- อ่านไฟล์ (มี fallback ไป GitHub) ----------------
-    with st.spinner("กำลังเตรียมข้อมูล..."):
-        if uploaded_file:
-            # อ่านไฟล์ที่ผู้ใช้อัปโหลด
+    # ล้างพาร์เก็ตเก่า (กันการโชว์ข้อมูลเก่า)
+    if reset_cache and PERSISTED_DATA_PATH.exists():
+        PERSISTED_DATA_PATH.unlink(missing_ok=True)
+        st.success("ล้างไฟล์ข้อมูลที่บันทึกไว้แล้ว (parquet)")
+
+    # เส้นทางที่ 1: อัปโหลดไฟล์
+    if uploaded_file:
+        with st.spinner("กำลังอ่านไฟล์ที่อัปโหลด..."):
             try:
                 uploaded_file.seek(0)
-                df = pd.read_csv(uploaded_file, keep_default_na=False, encoding='utf-8-sig', engine='python')
-                st.success("อ่านไฟล์ที่อัปโหลดสำเร็จ! กำลังประมวลผลข้อมูล...")
+                df_raw = pd.read_csv(uploaded_file, keep_default_na=False, encoding='utf-8-sig', engine='python')
+                st.success(f"อ่านไฟล์ที่อัปโหลดสำเร็จ — {len(df_raw):,} แถว")
             except Exception as e:
-                st.error(f"เกิดข้อผิดพลาดในการอ่านไฟล์ที่อัปโหลด: {e}")
-                st.stop()
-        else:
-            # ✅ ไม่มีการอัปโหลด -> ใช้ไฟล์สำรองจาก GitHub อัตโนมัติ
-            st.info("ยังไม่มีไฟล์ใหม่ ระบบจะใช้ไฟล์เริ่มต้นจาก GitHub: Validate.csv")
-            df = load_csv_from_url_fallback(DEFAULT_CSV_URL)
+                st.error(f"อ่านไฟล์ที่อัปโหลดไม่สำเร็จ: {e}")
+                return
+        with st.spinner("กำลังประมวลผลข้อมูล..."):
+            df = process_incident_dataframe(df_raw)
             if df.empty:
-                st.error("ไม่สามารถโหลดไฟล์สำรองจาก GitHub ได้ กรุณาอัปโหลดไฟล์ด้วยตนเอง")
-                st.stop()
-            else:
-                st.success("โหลดไฟล์สำรองจาก GitHub สำเร็จ! กำลังประมวลผลข้อมูล...")
+                st.error("ประมวลผลไม่สำเร็จ (ข้อมูลว่างหรือรูปแบบไม่ถูกต้อง)")
+                return
+            save_processed(df, note="จากไฟล์ที่อัปโหลด")
+            st.dataframe(df.head(10), use_container_width=True, hide_index=True)
+        return
+
+    # เส้นทางที่ 2: ยังไม่อัปโหลดแต่กดใช้ GitHub
+    if use_github:
+        with st.spinner("กำลังดึง CSV จาก GitHub (RAW) ..."):
+            df_raw = load_csv_from_url_fallback(DEFAULT_CSV_URL)
+            if df_raw.empty:
+                st.error("โหลดไฟล์จาก GitHub ไม่สำเร็จ")
+                return
+            st.info(f"โหลดจาก GitHub ได้ {len(df_raw):,} แถว")
+        with st.spinner("กำลังประมวลผลข้อมูล..."):
+            df = process_incident_dataframe(df_raw)
+            if df.empty:
+                st.error("ประมวลผลไม่สำเร็จ (ข้อมูลว่างหรือรูปแบบไม่ถูกต้อง)")
+                return
+            save_processed(df, note="จาก GitHub RAW")
+            st.dataframe(df.head(10), use_container_width=True, hide_index=True)
+        return
+
+    # ไม่อัปโหลด/ไม่กดอะไร — แค่แนะนำปุ่ม
+    st.info("📎 อัปโหลดไฟล์ .csv หรือกด “ใช้ไฟล์จาก GitHub (Validate.csv)” ด้านบน")
+
 
     # ---------------- ตรวจโครงสร้าง + แปลงคอลัมน์ ----------------
     df.columns = [col.strip() for col in df.columns]
@@ -1558,23 +1722,27 @@ def display_executive_dashboard():
     # ==============================================================================
     #  ✅ ส่วนที่ 2: หน้าที่ต้องโหลดข้อมูล (แดชบอร์ดทั้งหมด)
     # ==============================================================================
-    else:  # ส่วนแดชบอร์ด
+    else:
+    # ---------- โหลดข้อมูลหลัก ----------
         try:
             df = pd.read_parquet(PERSISTED_DATA_PATH)
             df['Occurrence Date'] = pd.to_datetime(df['Occurrence Date'])
+            st.caption(f"แหล่งข้อมูล: พาร์เก็ตที่บันทึกไว้ • {len(df):,} แถว")
         except FileNotFoundError:
-            # ✅ ลองดึงไฟล์เริ่มต้นจาก GitHub แล้วประมวลผลทันที (ไม่ต้องเข้าหน้า Admin)
-            st.warning("ยังไม่มีข้อมูลที่บันทึกไว้ จะดึงไฟล์เริ่มต้นจาก GitHub มาใช้ชั่วคราว")
+            st.warning("ยังไม่มีข้อมูลที่บันทึกไว้ จะพยายามโหลดจาก GitHub (Validate.csv)")
             df_raw = load_csv_from_url_fallback(DEFAULT_CSV_URL)
+            if df_raw.empty:
+                st.error("โหลดจาก GitHub ไม่สำเร็จ กรุณาไปหน้า Admin เพื่ออัปโหลด/กดดึงจาก GitHub")
+                return
             df = process_incident_dataframe(df_raw)
             if df.empty:
-                st.error("ไม่สามารถเตรียมข้อมูลจากไฟล์เริ่มต้นได้ กรุณาไปที่หน้า 'จัดการข้อมูล (Admin)' เพื่ออัปโหลดไฟล์")
+                st.error("ประมวลผลไฟล์จาก GitHub ไม่สำเร็จ")
                 return
-            # ไม่บังคับบันทึก แต่ถ้าต้องการให้แดชบอร์ดเร็วขึ้นครั้งต่อไปก็เซฟได้:
-            try:
-                df.to_parquet(PERSISTED_DATA_PATH, index=False)
-            except Exception:
-                pass
+            # บันทึกไว้เพื่อใช้ครั้งถัดไป
+            save_processed(df, note="(auto-fallback)")
+            st.caption(f"แหล่งข้อมูล: GitHub RAW (auto-fallback) • {len(df):,} แถว")
+
+    # ========= (ส่วนฟิลเตอร์/แดชบอร์ดเดิมของคุณใช้ df ต่อจากนี้) =========
 
 
         # --- สร้าง Sidebar ส่วนที่ต้องใช้ข้อมูล ---
