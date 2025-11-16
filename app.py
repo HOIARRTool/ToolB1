@@ -184,6 +184,39 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin1234")
 # ==============================================================================
 LOGO_URL = "https://raw.githubusercontent.com/HOIARRTool/hoiarr/refs/heads/main/logo1.png"
 st.set_page_config(page_title="HOIA-RR", page_icon=LOGO_URL, layout="wide")
+
+# URLs ของโลโก้ทั้ง 4
+logo_urls = [
+    "https://github.com/HOIARRTool/appqtbi/blob/main/messageImage_1763018987241.jpg?raw=true",
+    "https://github.com/HOIARRTool/appqtbi/blob/main/messageImage_1763018963411.jpg?raw=true",    
+    "https://mfu.ac.th/fileadmin/_processed_/6/7/csm_logo_mfu_3d_colour_15e5a7a50f.png",
+    "https://github.com/HOIARRTool/appqtbi/blob/main/logoSHS.png?raw=true"
+]
+st.set_page_config(page_title="HOIA-RR", page_icon=LOGO_URL, layout="wide")
+
+st.markdown(
+    """
+    <div style="
+        width: 100%;
+        display: flex;
+        justify-content: flex-end;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 8px 24px 0 0;
+    ">
+        <img src="https://github.com/HOIARRTool/appqtbi/blob/main/messageImage_1763018987241.jpg?raw=true" style="height:60px;">
+        <img src="https://github.com/HOIARRTool/appqtbi/blob/main/messageImage_1763018963411.jpg?raw=true" 
+            style="height:75px; margin-top:-3px;">
+        <img src="https://mfu.ac.th/fileadmin/_processed_/6/7/csm_logo_mfu_3d_colour_15e5a7a50f.png"
+             style="height:60px; margin-top:-3px;">
+        <!-- ขยับโลโก้ SHS ลงมานิดหน่อยด้วย margin-top -->
+        <img src="https://github.com/HOIARRTool/appqtbi/blob/main/logoSHS.png?raw=true"
+             style="height:60px; margin-top:4px;">
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap');
