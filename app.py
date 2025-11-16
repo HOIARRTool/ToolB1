@@ -2142,8 +2142,8 @@ def display_executive_dashboard():
                 matrix_data_counts[row_idx, col_idx] = row['counts']
 
         impact_labels_display = {
-            '5': "I / 5<br>Extreme / Death", '4': "G-H / 4<br>Major / Severe",
-            '3': "E-F / 3<br>Moderate", '2': "C-D / 2<br>Minor / Low", '1': "A-B / 1<br>Insignificant / No Harm"
+            '5': "I / 5<br>Death", '4': "G-H / 4<br>Severe Harm",
+            '3': "E-F / 3<br>Moderate Harm", '2': "C-D / 2<br>Low Harm", '1': "A-B / 1<br>No Harm"
         }
         freq_labels_display_short = {"1": "F1", "2": "F2", "3": "F3", "4": "F4", "5": "F5"}
         freq_labels_display_long = {
