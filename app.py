@@ -211,7 +211,7 @@ st.markdown(
              style="height:70px; margin-top:-1px;">
         <!-- ขยับโลโก้ SHS ลงมานิดหน่อยด้วย margin-top -->
         <img src="https://github.com/HOIARRTool/appqtbi/blob/main/logoSHS.png?raw=true"
-             style="height:50px; margin-top:7px;">
+             style="height:45px; margin-top:12px;">
     </div>
     """,
     unsafe_allow_html=True
