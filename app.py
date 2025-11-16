@@ -206,9 +206,9 @@ st.markdown(
     ">
         <img src="https://github.com/HOIARRTool/appqtbi/blob/main/messageImage_1763018987241.jpg?raw=true" style="height:60px;">
         <img src="https://github.com/HOIARRTool/appqtbi/blob/main/messageImage_1763018963411.jpg?raw=true" 
-            style="height:75px; margin-top:-3px;">
+            style="height:75px; margin-top:-4px;">
         <img src="https://mfu.ac.th/fileadmin/_processed_/6/7/csm_logo_mfu_3d_colour_15e5a7a50f.png"
-             style="height:60px; margin-top:-3px;">
+             style="height:70px; margin-top:-1px;">
         <!-- ขยับโลโก้ SHS ลงมานิดหน่อยด้วย margin-top -->
         <img src="https://github.com/HOIARRTool/appqtbi/blob/main/logoSHS.png?raw=true"
              style="height:60px; margin-top:4px;">
