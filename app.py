@@ -3124,56 +3124,128 @@ def display_executive_dashboard():
         st.markdown(f"**ช่วงข้อมูลที่วิเคราะห์:** {min_date_str} ถึง {max_date_str} (รวม {total_month} เดือน)")
         st.markdown(f"**จำนวนอุบัติการณ์ที่พบทั้งหมด:** {metrics_data.get('total_processed_incidents', 0):,} รายการ")
         st.markdown("---")
+        # ---------------------------------------------------------
+        # ส่วนที่ 1: เตรียมข้อมูลสำหรับแสดงผล (Data Preparation)
+        # ---------------------------------------------------------
 
-        # --- 1. แดชบอร์ดสรุปภาพรวม ---
-        st.subheader("1. แดชบอร์ดสรุปภาพรวม")
-        col1_m, col2_m, col3_m, col4_m, col5_m = st.columns(5)
-        with col1_m:
-            st.metric("อุบัติการณ์ทั้งหมด", f"{metrics_data.get('total_processed_incidents', 0):,}")
-        with col2_m:
-            st.metric("Sentinel Events", f"{metrics_data.get('total_sentinel_incidents_for_metric1', 0):,}")
-        with col3_m:
-            st.metric("มาตรฐานสำคัญฯ 9 ข้อ", f"{metrics_data.get('total_psg9_incidents_for_metric1', 0):,}")
-        with col4_m:
-            st.metric("ความรุนแรงสูง (E-I & 3-5)", f"{metrics_data.get('total_severe_incidents', 0):,}")
-        with col5_m:
-            val_unresolved = metrics_data.get('total_severe_unresolved_incidents_val', 'N/A')
-            st.metric("รุนแรงสูง & ยังไม่แก้ไข",
-                      f"{val_unresolved:,}" if isinstance(val_unresolved, int) else val_unresolved)
-        st.markdown("---")
+        # 1.1 สร้างคำแนะนำสำหรับผู้บริหาร (Executive Guide)
+        executive_guide_html = """
+        <div style="background-color: #f0f7ff; border-left: 5px solid #0056b3; padding: 15px; margin-bottom: 20px; border-radius: 4px;">
+            <h3 style="margin-top: 0; color: #0056b3; border-bottom: none; font-size: 16pt;">📌 คำแนะนำการอ่านรายงานสำหรับผู้บริหาร</h3>
+            <ul style="margin-top: 5px; line-height: 1.6; font-size: 12pt;">
+                <li>🚨 <b>Sentinel Events:</b> ต้องเป็น 0 เสมอ หากมีเกิดขึ้นต้องรีบประชุมทบทวนทันที</li>
+                <li>🔴 <b>ความรุนแรงสูง (E-I & 3-5):</b> โฟกัสรายการที่ "ยังไม่แก้ไข" เพื่อติดตามความคืบหน้า</li>
+                <li>📈 <b>Early Warning:</b> สัญญาณเตือนสิ่งที่กำลังเกิดบ่อยขึ้น แม้ยังไม่รุนแรงแต่ต้องรีบตัดวงจร</li>
+                <li>🩹 <b>ความเสี่ยงเรื้อรัง:</b> ปัญหาที่แก้ไม่หายและเกิดซ้ำซาก สะท้อนว่าต้องรื้อระบบงานใหม่</li>
+            </ul>
+        </div>
+        """
 
-        # --- 2. Risk Matrix และ Top 10 อุบัติการณ์ ---
-        st.subheader("2. Risk Matrix และ Top 10 อุบัติการณ์")
-        col_matrix, col_top10 = st.columns(2)
-        with col_matrix:
-            st.markdown("##### Risk Matrix")
-            impact_level_keys = ['5', '4', '3', '2', '1']
-            freq_level_keys = ['1', '2', '3', '4', '5']
-            matrix_df = df_filtered[
-                df_filtered['Impact Level'].isin(impact_level_keys) & df_filtered['Frequency Level'].isin(
-                    freq_level_keys)]
-            if not matrix_df.empty:
-                matrix_data = pd.crosstab(matrix_df['Impact Level'], matrix_df['Frequency Level'])
-                matrix_data = matrix_data.reindex(index=impact_level_keys, columns=freq_level_keys, fill_value=0)
-                impact_labels = {'5': "5 (Extreme)", '4': "4 (Major)", '3': "3 (Moderate)", '2': "2 (Minor)",
-                                 '1': "1 (Insignificant)"}
-                freq_labels = {'1': "F1", '2': "F2", '3': "F3", '4': "F4", '5': "F5"}
-                st.table(matrix_data.rename(index=impact_labels, columns=freq_labels))
-        with col_top10:
-            st.markdown("##### Top 10 อุบัติการณ์ (ตามความถี่)")
-            if not df_freq.empty:
-                df_freq_top10 = df_freq.nlargest(10, 'count').copy()
-                display_top10 = pd.merge(df_freq_top10,
-                                         df_filtered[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates(),
-                                         on='Incident', how='left')
-                st.dataframe(display_top10[['Incident', 'count']], hide_index=True,
-                             use_container_width=True,
-                             column_config={"Incident": "รหัส",
-                                            "count": "จำนวน"})
-            else:
-                st.info("ไม่มีข้อมูล Top 10")
-        st.markdown("---")
+        # 1.2 เตรียมตาราง Risk Matrix (แปลงเป็น HTML)
+        impact_level_keys = ['5', '4', '3', '2', '1']
+        freq_level_keys = ['1', '2', '3', '4', '5']
+        matrix_df = df_filtered[
+            df_filtered['Impact Level'].isin(impact_level_keys) & 
+            df_filtered['Frequency Level'].isin(freq_level_keys)
+        ]
+        
+        matrix_data_html = "<p>ไม่มีข้อมูล</p>"
+        if not matrix_df.empty:
+            matrix_data = pd.crosstab(matrix_df['Impact Level'], matrix_df['Frequency Level'])
+            matrix_data = matrix_data.reindex(index=impact_level_keys, columns=freq_level_keys, fill_value=0)
+            
+            impact_labels = {'5': "5 (Extreme)", '4': "4 (Major)", '3': "3 (Moderate)", '2': "2 (Minor)", '1': "1 (Insignificant)"}
+            freq_labels = {'1': "F1", '2': "F2", '3': "F3", '4': "F4", '5': "F5"}
+            
+            # แปลงเป็น HTML Table พร้อมคลาส CSS
+            matrix_data_html = matrix_data.rename(index=impact_labels, columns=freq_labels).to_html(
+                classes="styled-table",
+                table_id="risk-matrix-table"
+            )
 
+        # 1.3 เตรียมตาราง Top 10 (แก้ไขให้โชว์ชื่อ + จัดฟอร์แมต)
+        top10_html = "<p>ไม่มีข้อมูล</p>"
+        if not df_freq.empty:
+            top10_df = df_freq.nlargest(10, 'count').copy()
+            incident_names = df_filtered[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates()
+            top10_df = pd.merge(top10_df, incident_names, on='Incident', how='left')
+            
+            # ✅ แก้ไข: เลือกคอลัมน์ชื่อมาแสดงด้วย และเปลี่ยนชื่อหัวตารางภาษาไทย
+            top10_display = top10_df[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง', 'count']].rename(
+                columns={'Incident': 'รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง': 'ชื่ออุบัติการณ์', 'count': 'จำนวน'}
+            )
+            
+            top10_html = top10_display.to_html(
+                classes="styled-table",
+                index=False,
+                table_id="top10-table" # ใช้ ID นี้เพื่อกำหนดความกว้างใน CSS
+            )
+
+        # ---------------------------------------------------------
+        # ส่วนที่ 2: ประกอบร่าง HTML (HTML Assembly)
+        # ---------------------------------------------------------
+        html_string = f"""
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>            
+                @page {{ size: A4; margin: 2cm 1.5cm; @bottom-center {{ content: "หน้า " counter(page) " / " counter(pages); font-family: "TH SarabunPSK", sans-serif; font-size: 9pt; color: #888; }} }}
+                body {{ font-family: "TH SarabunPSK", sans-serif; font-size: 14pt; }}
+                h1 {{ font-size: 22pt; color: #001f3f; margin-bottom: 10px; }}
+                h2 {{ font-size: 18pt; color: #001f3f; border-bottom: 2px solid #001f3f; padding-bottom: 5px; margin-top: 20px; }}
+                h3 {{ font-size: 16pt; color: #003366; margin-top: 10px; }}
+                
+                /* ตกแต่งตาราง */
+                .styled-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; font-size: 13pt; }}
+                .styled-table th, .styled-table td {{ border: 1px solid #ddd; padding: 6px; text-align: left; word-wrap: break-word; }}
+                .styled-table th {{ background-color: #f2f2f2; font-weight: bold; color: #333; }}
+                
+                /* ตกแต่งกล่อง Metrics (Dashboard) */
+                .metric-container {{ display: flex; justify-content: space-between; padding: 10px; background-color: #f8f9fa; border-radius: 8px; border: 1px solid #e9ecef; margin-bottom: 15px; }}
+                .metric {{ text-align: center; width: 19%; }}
+                .metric-label {{ font-size: 11pt; color: #666; margin-bottom: 2px; }}
+                .metric-value {{ font-size: 18pt; font-weight: bold; color: #0056b3; }}
+                
+                /* ✅ CSS จัดความกว้างคอลัมน์ Top 10 ให้ชื่อยาวๆ ไม่เบียด */
+                #top10-table th:nth-child(1), #top10-table td:nth-child(1) {{ width: 15%; text-align: center; }} /* รหัส */
+                #top10-table th:nth-child(2), #top10-table td:nth-child(2) {{ width: 70%; }} /* ชื่อ (กว้างที่สุด) */
+                #top10-table th:nth-child(3), #top10-table td:nth-child(3) {{ width: 15%; text-align: center; }} /* จำนวน */
+                
+                #risk-matrix-table th:nth-child(1) {{ width: 30%; }}
+            </style>
+        </head>
+        <body>
+            <div style="text-align: right; color: #888; font-size: 10pt;">พิมพ์เมื่อ: {datetime.now().strftime('%d/%m/%Y')}</div>
+            
+            <h1>บทสรุปสำหรับผู้บริหาร (Executive Summary)</h1>
+            <p><b>ช่วงข้อมูล:</b> {min_date_str} ถึง {max_date_str} ({total_month} เดือน) | <b>จำนวนรวม:</b> {metrics_data.get('total_processed_incidents', 0):,} รายการ</p>
+
+            {executive_guide_html}
+
+            <h2>1. แดชบอร์ดสรุปภาพรวม</h2>
+            <div class="metric-container">
+                <div class="metric"><div class="metric-label">ทั้งหมด</div><div class="metric-value">{metrics_data.get('total_processed_incidents', 0):,}</div></div>
+                <div class="metric"><div class="metric-label" style="color: #dc3545;">Sentinel</div><div class="metric-value" style="color: #dc3545;">{metrics_data.get('total_sentinel_incidents_for_metric1', 0):,}</div></div>
+                <div class="metric"><div class="metric-label">PSG9</div><div class="metric-value">{metrics_data.get('total_psg9_incidents_for_metric1', 0):,}</div></div>
+                <div class="metric"><div class="metric-label">รุนแรงสูง</div><div class="metric-value">{metrics_data.get('total_severe_incidents', 0):,}</div></div>
+                <div class="metric"><div class="metric-label" style="color: #ffc107;">ยังไม่แก้ไข</div><div class="metric-value" style="color: #ffc107;">{metrics_data.get('total_severe_unresolved_incidents_val', 'N/A')}</div></div>
+            </div>
+
+            <table style="width: 100%; border: none;">
+                <tr style="vertical-align: top;">
+                    <td style="width: 45%; padding-right: 15px; border: none;">
+                        <h3>2.1 Risk Matrix</h3>
+                        {matrix_data_html}
+                        <div style="font-size: 10pt; color: #666; margin-top: 5px;">* แกนตั้ง: Impact (1-5), แกนนอน: Freq (F1-F5)</div>
+                    </td>
+                    <td style="width: 55%; border: none;">
+                        <h3>2.2 Top 10 อุบัติการณ์ที่พบบ่อย</h3>
+                        {top10_html}
+                    </td>
+                </tr>
+            </table>
+            
+            """
         # --- 3. รายการ Sentinel Events ---
         st.subheader("3. รายการ Sentinel Events")
         if 'Sentinel code for check' in df_filtered.columns:
