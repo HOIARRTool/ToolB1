@@ -3117,13 +3117,13 @@ def display_executive_dashboard():
                     st.info(result['existing_prevention'])
                     st.markdown("**Risk Monitor (การติดตาม):**")
                     st.info(result['existing_monitor'])
+                    
     elif selected_analysis == "บทสรุปสำหรับผู้บริหาร":
 
         st.markdown("<h4 style='color: #001f3f;'>บทสรุปสำหรับผู้บริหาร</h4>", unsafe_allow_html=True)
-        st.markdown(f"**เรื่อง:** รายงานสรุปอุบัติการณ์โรงพยาบาล")
-        st.markdown(f"**ช่วงข้อมูลที่วิเคราะห์:** {min_date_str} ถึง {max_date_str} (รวม {total_month} เดือน)")
-        st.markdown(f"**จำนวนอุบัติการณ์ที่พบทั้งหมด:** {metrics_data.get('total_processed_incidents', 0):,} รายการ")
-        st.markdown("---")
+        # แสดงบนหน้าจอก่อนเพื่อให้รู้ว่ากำลังทำงาน
+        st.info("กำลังสร้างรายงาน PDF... กรุณารอสักครู่")
+
         # ---------------------------------------------------------
         # ส่วนที่ 1: เตรียมข้อมูลสำหรับแสดงผล (Data Preparation)
         # ---------------------------------------------------------
@@ -3184,6 +3184,8 @@ def display_executive_dashboard():
         # ---------------------------------------------------------
         # ส่วนที่ 2: ประกอบร่าง HTML (HTML Assembly)
         # ---------------------------------------------------------
+        # เราจะนำตัวแปร Python มาใส่ใน string HTML โดยตรงเลย
+        
         html_string = f"""
         <html>
         <head>
@@ -3245,7 +3247,8 @@ def display_executive_dashboard():
                 </tr>
             </table>
             
-            """
+            """ 
+            
         # --- 3. รายการ Sentinel Events ---
         st.subheader("3. รายการ Sentinel Events")
         if 'Sentinel code for check' in df_filtered.columns:
