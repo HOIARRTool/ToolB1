@@ -3297,15 +3297,23 @@ def display_executive_dashboard():
                 #top10-table th:nth-child(3), #top10-table td:nth-child(3) {{ width: 15%; text-align: center; }} 
 
                 /* 3. PSG9 Table */
-                #psg9-table th:nth-child(1), #psg9-table td:nth-child(1) {{ width: 45%; text-align: left; }} 
+                /* คอลัมน์ 1: ลดจาก 45% -> 40% (เอาพื้นที่ไปให้ช่องสุดท้าย) */
+                #psg9-table th:nth-child(1), #psg9-table td:nth-child(1) {{ width: 40%; text-align: left; }} 
+                
+                /* คอลัมน์ 2-10 (A-I): เท่าเดิม 3.5% */
                 #psg9-table th:nth-child(n+2):nth-child(-n+10), #psg9-table td:nth-child(n+2):nth-child(-n+10) {{ width: 3.5%; text-align: center; padding: 4px 2px; }} 
-                #psg9-table th:nth-child(n+11), #psg9-table td:nth-child(n+11) {{ width: 7%; text-align: center; }} 
+                
+                /* คอลัมน์ 11-12 (รวม E-up, รวม A-I): เท่าเดิม 7% */
+                #psg9-table th:nth-child(n+11):nth-child(-n+12), #psg9-table td:nth-child(n+11):nth-child(-n+12) {{ width: 7%; text-align: center; }} 
+
+                /* ✅ คอลัมน์ 13 (ร้อยละ E-up): ขยายเป็น 12% (ใช้ :last-child เลือกตัวสุดท้าย) */
+                #psg9-table th:last-child, #psg9-table td:last-child {{ width: 12%; text-align: center; }}
 
                 /* 4. Unresolved Table */
-                #unresolved-table th:nth-child(1), #unresolved-table td:nth-child(1) {{ width: 12%; }} 
+                #unresolved-table th:nth-child(1), #unresolved-table td:nth-child(1) {{ width: 14%; }} 
                 #unresolved-table th:nth-child(2), #unresolved-table td:nth-child(2) {{ width: 10%; }} 
                 #unresolved-table th:nth-child(3), #unresolved-table td:nth-child(3) {{ width: 8%; text-align: center; }} 
-                #unresolved-table th:nth-child(4), #unresolved-table td:nth-child(4) {{ width: 70%; }} 
+                #unresolved-table th:nth-child(4), #unresolved-table td:nth-child(4) {{ width: 68%; }} 
 
                 /* ปุ่มพิมพ์ */
                 @media print {{
