@@ -2074,50 +2074,7 @@ def display_executive_dashboard():
                     st.markdown("---")
                 except Exception as e:
                     st.error(f"เกิดข้อผิดพลาดในการสร้าง Heatmap สำหรับ '{display_name}': {e}")
-    elif selected_analysis == "Sentinel Events & Top 10":
-        st.markdown("<h4 style='color: #001f3f;'>รายการ Sentinel Events ที่ตรวจพบ</h4>", unsafe_allow_html=True)
-        # ✅ แก้ไข: ใช้ df_filtered ที่ผ่านการกรองตามช่วงเวลาแล้ว
-        if 'sentinel_composite_keys' in globals() and sentinel_composite_keys and 'Sentinel code for check' in df_filtered.columns:
-            sentinel_events = df_filtered[df_filtered['Sentinel code for check'].isin(sentinel_composite_keys)].copy()
-
-            if not sentinel_events.empty:
-                if 'Sentinel2024_df' in globals() and not Sentinel2024_df.empty and 'ชื่ออุบัติการณ์ความเสี่ยง' in Sentinel2024_df.columns:
-                    sentinel_events = pd.merge(sentinel_events,
-                                               Sentinel2024_df[['รหัส', 'Impact', 'ชื่ออุบัติการณ์ความเสี่ยง']].rename(
-                                                   columns={'ชื่ออุบัติการณ์ความเสี่ยง': 'Sentinel Event Name'}),
-                                               on=['รหัส', 'Impact'], how='left')
-                display_sentinel_cols = ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized',
-                                         'Resulting Actions']
-                if 'Sentinel Event Name' in sentinel_events.columns:
-                    display_sentinel_cols.insert(2, 'Sentinel Event Name')
-                final_display_cols = [col for col in display_sentinel_cols if col in sentinel_events.columns]
-                st.dataframe(sentinel_events[final_display_cols], use_container_width=True, hide_index=True,
-                             column_config={
-                                 "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด", format="DD/MM/YYYY")})
-            else:
-                st.info("ไม่พบ Sentinel Events ในช่วงเวลาที่เลือก")
-        else:
-            st.warning("ไม่สามารถตรวจสอบ Sentinel Events ได้ (ไฟล์ Sentinel2024.xlsx อาจไม่มีข้อมูล)")
-        st.markdown("---")
-        st.subheader("Top 10 อุบัติการณ์ (ตามความถี่)")
-
-        if not df_freq.empty:
-            df_freq_top10 = df_freq.nlargest(10, 'count')
-            incident_names = df_filtered[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates()
-            df_freq_top10 = pd.merge(df_freq_top10, incident_names, on='Incident', how='left')
-
-            st.dataframe(
-                df_freq_top10[['Incident', 'count']],
-                column_config={
-                    "Incident": "รหัส Incident",
-                    "count": "จำนวนครั้ง"
-                },
-                use_container_width=True,
-                hide_index=True
-            )
-        else:
-            st.warning("ไม่สามารถแสดง Top 10 อุบัติการณ์ได้")
-
+            
     elif selected_analysis == "Risk Matrix (Interactive)":
         st.subheader("Risk Matrix (Interactive)")
 
@@ -2240,7 +2197,53 @@ def display_executive_dashboard():
                         f"**{row['รหัส']} | {row['ชื่ออุบัติการณ์ความเสี่ยง']}** (อัตราการเกิด: {row.get('total_occurrences', 0):.2f} ครั้ง/เดือน)")
         else:
             st.warning("ไม่พบคอลัมน์ 'Impact Level' หรือ 'Frequency Level' ที่จำเป็นสำหรับการสร้างตารางสรุปสี")
+            
+    elif selected_analysis == "Sentinel Events & Top 10":
+        st.markdown("<h4 style='color: #001f3f;'>รายการ Sentinel Events ที่ตรวจพบ</h4>", unsafe_allow_html=True)
+        # ✅ แก้ไข: ใช้ df_filtered ที่ผ่านการกรองตามช่วงเวลาแล้ว
+        if 'sentinel_composite_keys' in globals() and sentinel_composite_keys and 'Sentinel code for check' in df_filtered.columns:
+            sentinel_events = df_filtered[df_filtered['Sentinel code for check'].isin(sentinel_composite_keys)].copy()
 
+            if not sentinel_events.empty:
+                if 'Sentinel2024_df' in globals() and not Sentinel2024_df.empty and 'ชื่ออุบัติการณ์ความเสี่ยง' in Sentinel2024_df.columns:
+                    sentinel_events = pd.merge(sentinel_events,
+                                               Sentinel2024_df[['รหัส', 'Impact', 'ชื่ออุบัติการณ์ความเสี่ยง']].rename(
+                                                   columns={'ชื่ออุบัติการณ์ความเสี่ยง': 'Sentinel Event Name'}),
+                                               on=['รหัส', 'Impact'], how='left')
+                display_sentinel_cols = ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized',
+                                         'Resulting Actions']
+                if 'Sentinel Event Name' in sentinel_events.columns:
+                    display_sentinel_cols.insert(2, 'Sentinel Event Name')
+                final_display_cols = [col for col in display_sentinel_cols if col in sentinel_events.columns]
+                st.dataframe(sentinel_events[final_display_cols], use_container_width=True, hide_index=True,
+                             column_config={
+                                 "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด", format="DD/MM/YYYY")})
+            else:
+                st.info("ไม่พบ Sentinel Events ในช่วงเวลาที่เลือก")
+        else:
+            st.warning("ไม่สามารถตรวจสอบ Sentinel Events ได้ (ไฟล์ Sentinel2024.xlsx อาจไม่มีข้อมูล)")
+        st.markdown("---")
+        st.subheader("Top 10 อุบัติการณ์ (ตามความถี่)")
+
+        if not df_freq.empty:
+            df_freq_top10 = df_freq.nlargest(10, 'count')
+            incident_names = df_filtered[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates()
+            df_freq_top10 = pd.merge(df_freq_top10, incident_names, on='Incident', how='left')
+
+            # ✅ แก้ไขตรงนี้: เพิ่ม 'ชื่ออุบัติการณ์ความเสี่ยง' เข้าไปในลิสต์ที่จะแสดงผล
+            st.dataframe(
+                df_freq_top10[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง', 'count']],
+                column_config={
+                    "Incident": "รหัส",
+                    "ชื่ออุบัติการณ์ความเสี่ยง": "ชื่ออุบัติการณ์",
+                    "count": st.column_config.NumberColumn("จำนวนครั้ง", format="%d")
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.warning("ไม่สามารถแสดง Top 10 อุบัติการณ์ได้")
+            
     elif selected_analysis == "Sankey: ภาพรวม":
         st.markdown("<h4 style='color: #001f3f;'>Sankey Diagram: ภาพรวม</h4>", unsafe_allow_html=True)
         st.markdown("""
