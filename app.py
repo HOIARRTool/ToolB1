@@ -3130,15 +3130,14 @@ def display_executive_dashboard():
         # ส่วนที่ 1: เตรียมข้อมูล (Data Preparation)
         # ==========================================================================================
 
-        # 1.1 Executive Guide
+        # 1.1 Executive Guide (เอา class no-print ออก เพื่อให้พิมพ์ติด)
         executive_guide_html = """
         <div style="background-color: #f0f7ff; border-left: 5px solid #0056b3; padding: 15px; margin-bottom: 20px; border-radius: 4px;">
             <h3 style="margin-top: 0; color: #0056b3; border-bottom: none; font-size: 16pt;">📌 คำแนะนำการอ่านรายงานสำหรับผู้บริหาร</h3>
             <ul style="margin-top: 5px; line-height: 1.6; font-size: 12pt;">
                 <li>🚨 <b>Sentinel Events:</b> ต้องเป็น 0 เสมอ หากมีเกิดขึ้นต้องรีบประชุมทบทวนทันที</li>
                 <li>🔴 <b>ความรุนแรงสูง (E-I & 3-5):</b> โฟกัสรายการที่ "ยังไม่แก้ไข" เพื่อติดตามความคืบหน้า</li>
-                <li>📈 <b>Early Warning:</b> สัญญาณเตือนสิ่งที่กำลังเกิดบ่อยขึ้น แม้ยังไม่รุนแรงแต่ต้องรีบตัดวงจร</li>
-                <li>🩹 <b>ความเสี่ยงเรื้อรัง:</b> ปัญหาที่แก้ไม่หายและเกิดซ้ำซาก สะท้อนว่าต้องรื้อระบบงานใหม่</li>
+                <li>🩹 <b>ความเสี่ยงเรื้อรัง & Early Warning:</b> (สามารถดูรายละเอียดเชิงลึกได้ในเมนูวิเคราะห์เฉพาะด้านบน Sidebar)</li>
             </ul>
         </div>
         """
@@ -3151,6 +3150,7 @@ def display_executive_dashboard():
                 sentinel_cols = ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']
                 sent_disp = sentinel_events_df[sentinel_cols].copy()
                 sent_disp['Occurrence Date'] = sent_disp['Occurrence Date'].dt.strftime('%d/%m/%Y')
+                # ✅ table_id="sentinel-table"
                 sentinel_html = sent_disp.to_html(classes="styled-table", index=False, table_id="sentinel-table")
 
         # 1.3 Top 10 -> HTML
@@ -3162,12 +3162,14 @@ def display_executive_dashboard():
             top10_display = top10_df[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง', 'count']].rename(
                 columns={'Incident': 'รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง': 'ชื่ออุบัติการณ์', 'count': 'จำนวน'}
             )
+            # ✅ table_id="top10-table"
             top10_html = top10_display.to_html(classes="styled-table", index=False, table_id="top10-table")
 
         # 1.4 PSG9 Summary -> HTML
         psg9_html = "<p style='color:#888;'>ไม่พบข้อมูล PSG9</p>"
         psg9_summary_table = create_psg9_summary_table(df_filtered)
         if psg9_summary_table is not None and not psg9_summary_table.empty:
+            # ✅ table_id="psg9-table"
             psg9_html = psg9_summary_table.to_html(classes="styled-table", table_id="psg9-table")
 
         # 1.5 Safety Goals -> HTML
@@ -3189,30 +3191,7 @@ def display_executive_dashboard():
             if table is not None and not table.empty:
                 safety_goals_html += f"<h4>{display_name}</h4>" + table.to_html(classes="styled-table")
 
-        # 1.6 Persistence Risk -> HTML
-        persistence_html = "<p style='color:#888;'>ไม่มีข้อมูลเพียงพอสำหรับวิเคราะห์ความเสี่ยงเรื้อรัง</p>"
-        persistence_df_exec = calculate_persistence_risk_score(df_filtered, total_month)
-        if not persistence_df_exec.empty:
-            top_persistence = persistence_df_exec.head(5).rename(columns={
-                'Persistence_Risk_Score': 'Index', 
-                'Average_Ordinal_Risk_Score': 'Avg Risk',
-                'ชื่ออุบัติการณ์ความเสี่ยง': 'ชื่ออุบัติการณ์'
-            })
-            persistence_html = top_persistence[['รหัส', 'ชื่ออุบัติการณ์', 'Avg Risk', 'Index']].to_html(classes="styled-table", index=False, float_format="%.2f")
-
-        # 1.7 Early Warning -> HTML
-        early_warning_html = "<p style='color:#888;'>ไม่มีข้อมูลเพียงพอสำหรับ Early Warning</p>"
-        if 'prioritize_incidents_nb_logit_v2' in globals():
-            ew_df = prioritize_incidents_nb_logit_v2(df_filtered, horizon=3, min_months=4, min_total=5)
-            if not ew_df.empty:
-                ew_disp = ew_df.head(5).rename(columns={
-                    'ชื่ออุบัติการณ์ความเสี่ยง': 'ชื่ออุบัติการณ์', 
-                    'Priority_Score': 'Score',
-                    'Expected_Severe_nextH': 'คาดการณ์รุนแรง(3ด.)'
-                })
-                early_warning_html = ew_disp[['รหัส', 'ชื่ออุบัติการณ์', 'Score', 'คาดการณ์รุนแรง(3ด.)']].to_html(classes="styled-table", index=False, float_format="%.2f")
-
-        # 1.8 Unresolved Severe -> HTML
+        # 1.6 (New) Unresolved Severe -> HTML (ขยับจากข้อ 8 มาเป็นข้อ 6)
         unresolved_severe_html = "<p style='color:#888;'>เยี่ยมมาก! ไม่พบอุบัติการณ์รุนแรงค้างดำเนินการ</p>"
         if 'Resulting Actions' in df_filtered.columns:
             unresolved_df = df_filtered[
@@ -3221,9 +3200,10 @@ def display_executive_dashboard():
             ].copy()
             if not unresolved_df.empty:
                 unresolved_df['Occurrence Date'] = unresolved_df['Occurrence Date'].dt.strftime('%d/%m/%Y')
-                unresolved_severe_html = unresolved_df[['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']].to_html(classes="styled-table", index=False)
+                # ✅ table_id="unresolved-table"
+                unresolved_severe_html = unresolved_df[['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']].to_html(classes="styled-table", index=False, table_id="unresolved-table")
 
-        # 1.9 Risk Matrix (ส่วนที่เคยลืม)
+        # 1.7 Risk Matrix Data
         impact_level_keys = ['5', '4', '3', '2', '1']
         freq_level_keys = ['1', '2', '3', '4', '5']
         matrix_df = df_filtered[
@@ -3264,20 +3244,30 @@ def display_executive_dashboard():
                 .metric-value {{ font-size: 18pt; font-weight: bold; color: #0056b3; }}
                 
                 /* --- CSS จัดความกว้างตารางต่างๆ --- */
+                
+                /* 1. Sentinel Table */
                 #sentinel-table th:nth-child(1), #sentinel-table td:nth-child(1) {{ width: 12%; }} 
                 #sentinel-table th:nth-child(2), #sentinel-table td:nth-child(2) {{ width: 10%; }} 
                 #sentinel-table th:nth-child(3), #sentinel-table td:nth-child(3) {{ width: 8%; text-align: center; }} 
                 #sentinel-table th:nth-child(4), #sentinel-table td:nth-child(4) {{ width: 70%; }} 
 
+                /* 2. Top 10 Table */
                 #top10-table th:nth-child(1), #top10-table td:nth-child(1) {{ width: 15%; text-align: center; }} 
                 #top10-table th:nth-child(2), #top10-table td:nth-child(2) {{ width: 70%; }} 
                 #top10-table th:nth-child(3), #top10-table td:nth-child(3) {{ width: 15%; text-align: center; }} 
 
+                /* 3. PSG9 Table */
                 #psg9-table th:nth-child(1), #psg9-table td:nth-child(1) {{ width: 45%; text-align: left; }} 
                 #psg9-table th:nth-child(n+2):nth-child(-n+10), #psg9-table td:nth-child(n+2):nth-child(-n+10) {{ width: 3.5%; text-align: center; padding: 4px 2px; }} 
                 #psg9-table th:nth-child(n+11), #psg9-table td:nth-child(n+11) {{ width: 7%; text-align: center; }} 
 
-                /* ปุ่มพิมพ์ (จะซ่อนตอนสั่งพิมพ์จริง) */
+                /* 4. (New) Unresolved Table (ข้อ 6) - ปรับตามที่ขอ */
+                #unresolved-table th:nth-child(1), #unresolved-table td:nth-child(1) {{ width: 12%; }} /* Date */
+                #unresolved-table th:nth-child(2), #unresolved-table td:nth-child(2) {{ width: 10%; }} /* Incident */
+                #unresolved-table th:nth-child(3), #unresolved-table td:nth-child(3) {{ width: 8%; text-align: center; }} /* Impact */
+                #unresolved-table th:nth-child(4), #unresolved-table td:nth-child(4) {{ width: 70%; }} /* Detail (กว้าง 2 เท่าของเดิม) */
+
+                /* ปุ่มพิมพ์ */
                 @media print {{
                     .no-print {{ display: none !important; }}
                     body {{ -webkit-print-color-adjust: exact; }}
@@ -3297,9 +3287,7 @@ def display_executive_dashboard():
             <h1>บทสรุปสำหรับผู้บริหาร (Executive Summary)</h1>
             <p><b>ช่วงข้อมูล:</b> {min_date_str} ถึง {max_date_str} ({total_month} เดือน) | <b>จำนวนรวม:</b> {metrics_data.get('total_processed_incidents', 0):,} รายการ</p>
             
-            <div class="no-print">
-                {executive_guide_html}
-            </div>
+            {executive_guide_html}
 
             <h2>1. แดชบอร์ดสรุปภาพรวม</h2>
             <div class="metric-container">
@@ -3324,28 +3312,19 @@ def display_executive_dashboard():
             <h2>5. สรุปอุบัติการณ์ตาม Safety Goals</h2>
             {safety_goals_html}
 
-            <h2>6. ความเสี่ยงเรื้อรัง (Persistence Risk)</h2>
-            {persistence_html}
-
-            <h2>7. Early Warning (แนวโน้มสูงขึ้น)</h2>
-            {early_warning_html}
-
-            <h2>8. อุบัติการณ์รุนแรงค้างดำเนินการ</h2>
+            <h2>6. อุบัติการณ์รุนแรงค้างดำเนินการ</h2>
             {unresolved_severe_html}
         </body>
         </html>
         """
 
         # ==========================================================================================
-        # ส่วนที่ 3: แสดงผล (Display) - ใช้ HTML Preview ล้วนๆ
+        # ส่วนที่ 3: แสดงผล (Display)
         # ==========================================================================================
         
         st.success("✅ สร้างรายงานเรียบร้อยแล้ว")
         
-        # ใช้ components ของ Streamlit เพื่อเรนเดอร์ HTML
         import streamlit.components.v1 as components
-        
-        # ใส่กรอบสีขาวและเงาให้ดูเหมือนกระดาษ A4 บนหน้าจอ
         preview_html = f"""
         <div style="
             border: 1px solid #ccc; 
@@ -3357,7 +3336,6 @@ def display_executive_dashboard():
             {html_string}
         </div>
         """
-        # render html ด้วยความสูงที่มากพอ
         components.html(preview_html, height=1200, scrolling=True)
            
 
