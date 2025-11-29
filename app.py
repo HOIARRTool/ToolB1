@@ -3121,14 +3121,10 @@ def display_executive_dashboard():
     elif selected_analysis == "บทสรุปสำหรับผู้บริหาร":
 
         st.markdown("<h4 style='color: #001f3f;'>บทสรุปสำหรับผู้บริหาร</h4>", unsafe_allow_html=True)
-        # แสดงบนหน้าจอก่อนเพื่อให้รู้ว่ากำลังทำงาน
-        st.info("กำลังสร้างรายงาน PDF... กรุณารอสักครู่")
-
-        # ---------------------------------------------------------
-        # ส่วนที่ 1: เตรียมข้อมูลสำหรับแสดงผล (Data Preparation)
-        # ---------------------------------------------------------
-
-        # 1.1 สร้างคำแนะนำสำหรับผู้บริหาร (Executive Guide)
+        
+        # --- ส่วนที่ 1: เตรียมข้อมูล (Data Preparation) ---
+        
+        # 1.1 Executive Guide
         executive_guide_html = """
         <div style="background-color: #f0f7ff; border-left: 5px solid #0056b3; padding: 15px; margin-bottom: 20px; border-radius: 4px;">
             <h3 style="margin-top: 0; color: #0056b3; border-bottom: none; font-size: 16pt;">📌 คำแนะนำการอ่านรายงานสำหรับผู้บริหาร</h3>
@@ -3141,7 +3137,7 @@ def display_executive_dashboard():
         </div>
         """
 
-        # 1.2 เตรียมตาราง Risk Matrix (แปลงเป็น HTML)
+        # 1.2 Risk Matrix Data HTML
         impact_level_keys = ['5', '4', '3', '2', '1']
         freq_level_keys = ['1', '2', '3', '4', '5']
         matrix_df = df_filtered[
@@ -3153,39 +3149,22 @@ def display_executive_dashboard():
         if not matrix_df.empty:
             matrix_data = pd.crosstab(matrix_df['Impact Level'], matrix_df['Frequency Level'])
             matrix_data = matrix_data.reindex(index=impact_level_keys, columns=freq_level_keys, fill_value=0)
-            
-            impact_labels = {'5': "5 (Extreme)", '4': "4 (Major)", '3': "3 (Moderate)", '2': "2 (Minor)", '1': "1 (Insignificant)"}
+            impact_labels = {'5': "5 (Ext)", '4': "4 (Maj)", '3': "3 (Mod)", '2': "2 (Min)", '1': "1 (Ins)"}
             freq_labels = {'1': "F1", '2': "F2", '3': "F3", '4': "F4", '5': "F5"}
-            
-            # แปลงเป็น HTML Table พร้อมคลาส CSS
-            matrix_data_html = matrix_data.rename(index=impact_labels, columns=freq_labels).to_html(
-                classes="styled-table",
-                table_id="risk-matrix-table"
-            )
+            matrix_data_html = matrix_data.rename(index=impact_labels, columns=freq_labels).to_html(classes="styled-table", table_id="risk-matrix-table")
 
-        # 1.3 เตรียมตาราง Top 10 (แก้ไขให้โชว์ชื่อ + จัดฟอร์แมต)
+        # 1.3 Top 10 Data HTML
         top10_html = "<p>ไม่มีข้อมูล</p>"
         if not df_freq.empty:
             top10_df = df_freq.nlargest(10, 'count').copy()
             incident_names = df_filtered[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates()
             top10_df = pd.merge(top10_df, incident_names, on='Incident', how='left')
-            
-            # ✅ แก้ไข: เลือกคอลัมน์ชื่อมาแสดงด้วย และเปลี่ยนชื่อหัวตารางภาษาไทย
             top10_display = top10_df[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง', 'count']].rename(
                 columns={'Incident': 'รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง': 'ชื่ออุบัติการณ์', 'count': 'จำนวน'}
             )
-            
-            top10_html = top10_display.to_html(
-                classes="styled-table",
-                index=False,
-                table_id="top10-table" # ใช้ ID นี้เพื่อกำหนดความกว้างใน CSS
-            )
+            top10_html = top10_display.to_html(classes="styled-table", index=False, table_id="top10-table")
 
-        # ---------------------------------------------------------
-        # ส่วนที่ 2: ประกอบร่าง HTML (HTML Assembly)
-        # ---------------------------------------------------------
-        # เราจะนำตัวแปร Python มาใส่ใน string HTML โดยตรงเลย
-        
+        # --- ส่วนที่ 2: สร้าง HTML String รวม (HTML Assembly) ---
         html_string = f"""
         <html>
         <head>
@@ -3196,32 +3175,23 @@ def display_executive_dashboard():
                 h1 {{ font-size: 22pt; color: #001f3f; margin-bottom: 10px; }}
                 h2 {{ font-size: 18pt; color: #001f3f; border-bottom: 2px solid #001f3f; padding-bottom: 5px; margin-top: 20px; }}
                 h3 {{ font-size: 16pt; color: #003366; margin-top: 10px; }}
-                
-                /* ตกแต่งตาราง */
                 .styled-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; font-size: 13pt; }}
                 .styled-table th, .styled-table td {{ border: 1px solid #ddd; padding: 6px; text-align: left; word-wrap: break-word; }}
                 .styled-table th {{ background-color: #f2f2f2; font-weight: bold; color: #333; }}
-                
-                /* ตกแต่งกล่อง Metrics (Dashboard) */
                 .metric-container {{ display: flex; justify-content: space-between; padding: 10px; background-color: #f8f9fa; border-radius: 8px; border: 1px solid #e9ecef; margin-bottom: 15px; }}
                 .metric {{ text-align: center; width: 19%; }}
                 .metric-label {{ font-size: 11pt; color: #666; margin-bottom: 2px; }}
                 .metric-value {{ font-size: 18pt; font-weight: bold; color: #0056b3; }}
-                
-                /* ✅ CSS จัดความกว้างคอลัมน์ Top 10 ให้ชื่อยาวๆ ไม่เบียด */
-                #top10-table th:nth-child(1), #top10-table td:nth-child(1) {{ width: 15%; text-align: center; }} /* รหัส */
-                #top10-table th:nth-child(2), #top10-table td:nth-child(2) {{ width: 70%; }} /* ชื่อ (กว้างที่สุด) */
-                #top10-table th:nth-child(3), #top10-table td:nth-child(3) {{ width: 15%; text-align: center; }} /* จำนวน */
-                
-                #risk-matrix-table th:nth-child(1) {{ width: 30%; }}
+                #top10-table th:nth-child(1), #top10-table td:nth-child(1) {{ width: 15%; text-align: center; }}
+                #top10-table th:nth-child(2), #top10-table td:nth-child(2) {{ width: 70%; }}
+                #top10-table th:nth-child(3), #top10-table td:nth-child(3) {{ width: 15%; text-align: center; }}
             </style>
         </head>
         <body>
             <div style="text-align: right; color: #888; font-size: 10pt;">พิมพ์เมื่อ: {datetime.now().strftime('%d/%m/%Y')}</div>
-            
             <h1>บทสรุปสำหรับผู้บริหาร (Executive Summary)</h1>
             <p><b>ช่วงข้อมูล:</b> {min_date_str} ถึง {max_date_str} ({total_month} เดือน) | <b>จำนวนรวม:</b> {metrics_data.get('total_processed_incidents', 0):,} รายการ</p>
-
+            
             {executive_guide_html}
 
             <h2>1. แดชบอร์ดสรุปภาพรวม</h2>
@@ -3238,7 +3208,6 @@ def display_executive_dashboard():
                     <td style="width: 45%; padding-right: 15px; border: none;">
                         <h3>2.1 Risk Matrix</h3>
                         {matrix_data_html}
-                        <div style="font-size: 10pt; color: #666; margin-top: 5px;">* แกนตั้ง: Impact (1-5), แกนนอน: Freq (F1-F5)</div>
                     </td>
                     <td style="width: 55%; border: none;">
                         <h3>2.2 Top 10 อุบัติการณ์ที่พบบ่อย</h3>
@@ -3247,7 +3216,47 @@ def display_executive_dashboard():
                 </tr>
             </table>
             
-            """ 
+            <h2>3. ข้อมูลเพิ่มเติม (Sentinel / PSG9 / Safety Goals / Others)</h2>
+            {sentinel_html}
+            {psg9_html}
+            {safety_goals_html}
+            {persistence_html}
+            {early_warning_html}
+            {unresolved_severe_html}
+        </body>
+        </html>
+        """
+
+        # --- ส่วนที่ 3: การแสดงผลและการดาวน์โหลด (Display & Download) ---
+        
+        # 3.1 แสดงตัวอย่างบนหน้าเว็บ
+        import streamlit.components.v1 as components
+        preview_html = f"""
+        <div style="border: 1px solid #ccc; padding: 40px; width: 100%; background-color: white; box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); margin-bottom: 20px;">
+            {html_string}
+        </div>
+        """
+        st.success("✅ สร้างรายงานเรียบร้อยแล้ว ท่านสามารถดูตัวอย่างด้านล่าง หรือกดปุ่มเพื่อดาวน์โหลด PDF")
+        components.html(preview_html, height=800, scrolling=True)
+
+        # 3.2 ปุ่มดาวน์โหลด PDF
+        try:
+            from weasyprint import HTML
+            pdf_data = HTML(string=html_string).write_pdf()
+            
+            st.download_button(
+                label="📄 ดาวน์โหลดรายงานเป็น PDF",
+                data=pdf_data,
+                file_name=f"Executive_Summary_{datetime.now().strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True
+            )
+        except ImportError:
+            st.error("⚠️ ไม่พบไลบรารี 'weasyprint' กรุณาติดตั้งด้วยคำสั่ง: `pip install weasyprint`")
+        except Exception as e:
+            st.error(f"⚠️ เกิดข้อผิดพลาดในการสร้างไฟล์ PDF: {e}")
+            st.info("💡 ท่านสามารถใช้ฟังก์ชัน **Print to PDF** ของ Browser (กด Ctrl+P) ที่กรอบตัวอย่างด้านบนแทนได้")     
             
         # --- 3. รายการ Sentinel Events ---
         st.subheader("3. รายการ Sentinel Events")
