@@ -3219,7 +3219,7 @@ def display_executive_dashboard():
             matrix_data_html = matrix_data.rename(index=impact_labels, columns=freq_labels).to_html(classes="styled-table", table_id="risk-matrix-table")
 
         # ==========================================================================================
-        # ส่วนที่ 2: ประกอบร่าง HTML (HTML Assembly)
+        # ส่วนที่ 2: ประกอบร่าง HTML (HTML Assembly) - ปรับ Font Size +2pt
         # ==========================================================================================
         
         html_string = f"""
@@ -3227,21 +3227,61 @@ def display_executive_dashboard():
         <head>
             <meta charset="UTF-8">
             <style>            
-                @page {{ size: A4; margin: 1cm; @bottom-center {{ content: "หน้า " counter(page) " / " counter(pages); font-family: "TH SarabunPSK", sans-serif; font-size: 10pt; color: #888; }} }}
-                body {{ font-family: "TH SarabunPSK", sans-serif; font-size: 14pt; }}
-                h1 {{ font-size: 24pt; color: #001f3f; margin-bottom: 10px; margin-top: 0; }}
-                h2 {{ font-size: 18pt; color: #001f3f; border-bottom: 2px solid #001f3f; padding-bottom: 5px; margin-top: 25px; }}
-                h3 {{ font-size: 16pt; color: #003366; margin-top: 15px; margin-bottom: 10px; }}
-                h4 {{ font-size: 14pt; color: #444; margin-top: 10px; margin-bottom: 5px; font-weight: bold; background-color: #eee; padding: 5px; }}
+                /* 1. ปรับขอบกระดาษ */
+                @page {{ 
+                    size: A4; 
+                    margin: 1.5cm 2cm; 
+                    @bottom-center {{ 
+                        content: "หน้า " counter(page) " / " counter(pages); 
+                        font-family: "TH SarabunPSK", sans-serif; 
+                        font-size: 12pt; /* ปรับจาก 10 -> 12pt */
+                        color: #888; 
+                    }} 
+                }}
                 
-                .styled-table {{ width: 100%; border-collapse: collapse; margin-top: 5px; table-layout: fixed; font-size: 12pt; }}
-                .styled-table th, .styled-table td {{ border: 1px solid #ddd; padding: 5px; text-align: left; word-wrap: break-word; vertical-align: top; }}
+                /* 2. บังคับคำนวณขอบรวมในความกว้าง */
+                * {{ box-sizing: border-box; }}
+
+                /* ✅ ปรับ Body จาก 14pt -> 16pt */
+                body {{ font-family: "TH SarabunPSK", sans-serif; font-size: 16pt; line-height: 1.3; }}
+                
+                /* ✅ ปรับหัวข้อต่างๆ เพิ่ม +2pt */
+                h1 {{ font-size: 26pt; color: #001f3f; margin-bottom: 15px; margin-top: 0; padding-top: 0; }}
+                h2 {{ font-size: 20pt; color: #001f3f; border-bottom: 2px solid #001f3f; padding-bottom: 5px; margin-top: 25px; }}
+                h3 {{ font-size: 18pt; color: #003366; margin-top: 15px; margin-bottom: 10px; }}
+                h4 {{ font-size: 16pt; color: #444; margin-top: 10px; margin-bottom: 5px; font-weight: bold; background-color: #eee; padding: 5px; }}
+                
+                /* ✅ ปรับตาราง จาก 12pt -> 14pt */
+                .styled-table {{ 
+                    width: 100%; 
+                    border-collapse: collapse; 
+                    margin-top: 5px; 
+                    table-layout: fixed; 
+                    font-size: 14pt; 
+                }}
+                
+                .styled-table th, .styled-table td {{ 
+                    border: 1px solid #ddd; 
+                    padding: 6px; 
+                    text-align: left; 
+                    word-wrap: break-word; 
+                    vertical-align: top; 
+                }}
+                
                 .styled-table th {{ background-color: #f2f2f2; font-weight: bold; color: #333; }}
                 
-                .metric-container {{ display: flex; justify-content: space-between; padding: 10px; background-color: #f8f9fa; border-radius: 8px; border: 1px solid #e9ecef; margin-bottom: 15px; }}
+                .metric-container {{ 
+                    display: flex; 
+                    justify-content: space-between; 
+                    padding: 10px; 
+                    background-color: #f8f9fa; 
+                    border-radius: 8px; 
+                    border: 1px solid #e9ecef; 
+                    margin-bottom: 15px; 
+                }}
                 .metric {{ text-align: center; width: 19%; }}
-                .metric-label {{ font-size: 11pt; color: #666; margin-bottom: 2px; }}
-                .metric-value {{ font-size: 18pt; font-weight: bold; color: #0056b3; }}
+                .metric-label {{ font-size: 13pt; color: #666; margin-bottom: 2px; }} /* 11->13pt */
+                .metric-value {{ font-size: 20pt; font-weight: bold; color: #0056b3; }} /* 18->20pt */
                 
                 /* --- CSS จัดความกว้างตารางต่างๆ --- */
                 
@@ -3261,20 +3301,20 @@ def display_executive_dashboard():
                 #psg9-table th:nth-child(n+2):nth-child(-n+10), #psg9-table td:nth-child(n+2):nth-child(-n+10) {{ width: 3.5%; text-align: center; padding: 4px 2px; }} 
                 #psg9-table th:nth-child(n+11), #psg9-table td:nth-child(n+11) {{ width: 7%; text-align: center; }} 
 
-                /* 4. (New) Unresolved Table (ข้อ 6) - ปรับตามที่ขอ */
-                #unresolved-table th:nth-child(1), #unresolved-table td:nth-child(1) {{ width: 12%; }} /* Date */
-                #unresolved-table th:nth-child(2), #unresolved-table td:nth-child(2) {{ width: 10%; }} /* Incident */
-                #unresolved-table th:nth-child(3), #unresolved-table td:nth-child(3) {{ width: 8%; text-align: center; }} /* Impact */
-                #unresolved-table th:nth-child(4), #unresolved-table td:nth-child(4) {{ width: 70%; }} /* Detail (กว้าง 2 เท่าของเดิม) */
+                /* 4. Unresolved Table */
+                #unresolved-table th:nth-child(1), #unresolved-table td:nth-child(1) {{ width: 12%; }} 
+                #unresolved-table th:nth-child(2), #unresolved-table td:nth-child(2) {{ width: 10%; }} 
+                #unresolved-table th:nth-child(3), #unresolved-table td:nth-child(3) {{ width: 8%; text-align: center; }} 
+                #unresolved-table th:nth-child(4), #unresolved-table td:nth-child(4) {{ width: 70%; }} 
 
                 /* ปุ่มพิมพ์ */
                 @media print {{
                     .no-print {{ display: none !important; }}
-                    body {{ -webkit-print-color-adjust: exact; }}
+                    body {{ -webkit-print-color-adjust: exact; margin: 0; padding: 0; }}
                 }}
                 .print-btn {{
                     background-color: #007bff; color: white; border: none; padding: 10px 20px; 
-                    border-radius: 5px; cursor: pointer; font-size: 14pt; margin-bottom: 20px;
+                    border-radius: 5px; cursor: pointer; font-size: 16pt; margin-bottom: 20px;
                     display: block; width: 100%; text-align: center; text-decoration: none;
                 }}
                 .print-btn:hover {{ background-color: #0056b3; }}
@@ -3283,7 +3323,7 @@ def display_executive_dashboard():
         <body>
             <button class="print-btn no-print" onclick="window.print()">🖨️ พิมพ์รายงานนี้ / บันทึกเป็น PDF</button>
 
-            <div style="text-align: right; color: #888; font-size: 10pt;">พิมพ์เมื่อ: {datetime.now().strftime('%d/%m/%Y')}</div>
+            <div style="text-align: right; color: #888; font-size: 12pt;">พิมพ์เมื่อ: {datetime.now().strftime('%d/%m/%Y')}</div>
             <h1>บทสรุปสำหรับผู้บริหาร (Executive Summary)</h1>
             <p><b>ช่วงข้อมูล:</b> {min_date_str} ถึง {max_date_str} ({total_month} เดือน) | <b>จำนวนรวม:</b> {metrics_data.get('total_processed_incidents', 0):,} รายการ</p>
             
