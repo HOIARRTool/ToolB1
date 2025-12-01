@@ -2608,7 +2608,8 @@ def display_executive_dashboard():
                 ["👁️ วิเคราะห์ตามหมวดหมู่ PSG9",
                  "👁️ วิเคราะห์ตามกลุ่มหลัก (C/G)",
                  "👁️ วิเคราะห์รายรหัส",
-                 "👁️ อุบัติการณ์ที่รอการแก้ไข(ตามความรุนแรง)"])
+                 "👁️ อุบัติการณ์ที่รอการแก้ไข(ตามความรุนแรง),
+                 "👁️ วิเคราะห์ตามหมวดหมู่ Safety Goals"])
 
             # --- Tab ที่ 1: วิเคราะห์ตามหมวดหมู่ PSG9 ---
             with tab_psg9:
@@ -2865,7 +2866,46 @@ def display_executive_dashboard():
                                 st.dataframe(severity_df[display_cols], use_container_width=True, hide_index=True,
                                              column_config={"Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
                                                                                                                format="DD/MM/YYYY")})
-
+                                                                                                               
+            # ----------------------------------------------------------------------
+            # เพิ่มโค้ดสำหรับ Tab ที่ 5 ตรงนี้
+            # ----------------------------------------------------------------------
+            with tab_safety_goals:
+                st.subheader("ภาพรวมอุบัติการณ์จำแนกตาม Safety Goals")
+                st.info("ตารางแสดงสถิติความรุนแรงแยกตามประเภทอุบัติการณ์ (Incident Type) ภายใต้แต่ละเป้าหมายความปลอดภัย")
+    
+                # นิยาม Mapping ระหว่างชื่อที่จะแสดง กับ ชื่อหมวดในข้อมูล (Column 'หมวด')
+                goal_definitions = {
+                    "Patient Safety/ Common Clinical Risk": "P:Patient Safety Goals หรือ Common Clinical Risk Incident",
+                    "Specific Clinical Risk": "S:Specific Clinical Risk Incident",
+                    "Personnel Safety": "P:Personnel Safety Goals",
+                    "Organization Safety": "O:Organization Safety Goals"
+                }
+    
+                for display_name, cat_name in goal_definitions.items():
+                    st.markdown(f"##### {display_name}")
+    
+                    # ตรวจสอบว่าเป็นหมวด Organization Safety หรือไม่ (เพราะระดับความรุนแรงใช้ 1-5 ไม่ใช่ A-I)
+                    is_org_safety = (display_name == "Organization Safety")
+    
+                    # เรียกใช้ฟังก์ชันที่มีอยู่แล้วในโค้ดของคุณ
+                    # ฟังก์ชันนี้จะ pivot Incident Type มาเป็น Row และ Impact เป็น Column ให้เหมือน PSG9
+                    summary_table = create_goal_summary_table(
+                        df_filtered, 
+                        cat_name,
+                        # ถ้าเป็น Org Safety ให้ตัดระดับ 1,2 ออกจาก E-up (นับ 3-5 เป็นรุนแรง)
+                        # ถ้าเป็น Safety อื่นๆ ให้ตัด A,B,C,D ออก (นับ E-I เป็นรุนแรง)
+                        e_up_non_numeric_levels_param=[] if is_org_safety else ['A', 'B', 'C', 'D'],
+                        e_up_numeric_levels_param=['1', '2'] if is_org_safety else None,
+                        is_org_safety_table=is_org_safety
+                    )
+    
+                    if summary_table is not None and not summary_table.empty:
+                        st.dataframe(summary_table, use_container_width=True)
+                    else:
+                        st.info(f"ไม่พบข้อมูลสำหรับ '{display_name}' ในช่วงเวลาที่เลือก")
+                    
+                    st.markdown("---")
     elif selected_analysis == "Persistence Risk Index":
         st.markdown("<h4 style='color: #001f3f;'>ดัชนีความเสี่ยงเรื้อรัง (Persistence Risk Index)</h4>", unsafe_allow_html=True)
         st.info(
