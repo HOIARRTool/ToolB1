@@ -1883,7 +1883,7 @@ def display_executive_dashboard():
         with col1:
             st.metric("Total", f"{total_processed_incidents:,}")
         with col2:
-            st.metric("PSG9", f"{total_psg9_incidents_for_metric1:,}")
+            st.metric("มาตรฐานสำคัญจำเป็นฯ 9 ข้อ", f"{total_psg9_incidents_for_metric1:,}")
             with st.expander(f"ดูรายละเอียด ({total_psg9_incidents_for_metric1} รายการ)"):
                 psg9_df = df_filtered[df_filtered['รหัส'].isin(psg9_r_codes_for_counting)]
                 st.dataframe(psg9_df[dashboard_expander_cols], use_container_width=True, hide_index=True,
