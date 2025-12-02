@@ -1903,7 +1903,7 @@ def display_executive_dashboard():
                 st.dataframe(df_severe_incidents[dashboard_expander_cols], use_container_width=True, hide_index=True,
                              column_config=date_format_config)
         with col5:
-            st.metric("E-I & 3-5 [PSG9]", f"{total_severe_psg9_incidents:,}")
+            st.metric("E-I & 3-5 [มาตรฐานสำคัญฯ]", f"{total_severe_psg9_incidents:,}")
             with st.expander(f"ดูรายละเอียด ({total_severe_psg9_incidents} รายการ)"):
                 severe_psg9_df = df_severe_incidents[df_severe_incidents['รหัส'].isin(psg9_r_codes_for_counting)]
                 st.dataframe(severe_psg9_df[dashboard_expander_cols], use_container_width=True, hide_index=True,
@@ -1922,7 +1922,7 @@ def display_executive_dashboard():
         with col7:
             val_unresolved_psg9 = f"{total_severe_unresolved_psg9_incidents_val:,}" if isinstance(
                 total_severe_unresolved_psg9_incidents_val, int) else "N/A"
-            st.metric(f"E-I & 3-5 [PSG9] ที่ยังไม่ถูกแก้ไข", val_unresolved_psg9)
+            st.metric(f"E-I & 3-5 [มาตรฐานสำคัญฯ] ที่ยังไม่ถูกแก้ไข", val_unresolved_psg9)
             if isinstance(total_severe_unresolved_psg9_incidents_val,
                           int) and total_severe_unresolved_psg9_incidents_val > 0:
                 with st.expander(f"ดูรายละเอียด ({total_severe_unresolved_psg9_incidents_val} รายการ)"):
@@ -2605,13 +2605,13 @@ def display_executive_dashboard():
                 "ไม่สามารถแสดงข้อมูลได้ เนื่องจากไม่พบคอลัมน์ 'Resulting Actions' หรือ 'หมวดหมู่มาตรฐานสำคัญ' ในข้อมูล")
         else:
             tab_psg9, tab_groups, tab_by_code, tab_waitlist, tab_safety_goals = st.tabs(
-                ["👁️ วิเคราะห์ตามหมวดหมู่ PSG9",
+                ["👁️ วิเคราะห์ตามมาตรฐานสำคัญจำเป็นฯ",
                  "👁️ วิเคราะห์ตามกลุ่มหลัก (C/G)",
                  "👁️ วิเคราะห์รายรหัส",
                  "👁️ อุบัติการณ์ที่รอการแก้ไข(ตามความรุนแรง)",
                  "👁️ วิเคราะห์ตามหมวดหมู่ Safety Goals"])
 
-            # --- Tab ที่ 1: วิเคราะห์ตามหมวดหมู่ PSG9 ---
+            # --- Tab ที่ 1: วิเคราะห์ตามมาตรฐานสำคัญจำเป็นฯ ---
             with tab_psg9:
                 st.subheader("ภาพรวมอุบัติการณ์ตามมาตรฐานสำคัญจำเป็นต่อความปลอดภัย (PSG9)")
                 # ✅ แก้ไข: ใช้ df_filtered
@@ -2622,7 +2622,7 @@ def display_executive_dashboard():
                     st.info("ไม่พบข้อมูลอุบัติการณ์ที่เกี่ยวข้องกับมาตรฐานสำคัญ 9 ข้อในช่วงเวลานี้")
 
                 st.markdown("---")
-                st.subheader("สถานะการแก้ไขในแต่ละหมวดหมู่ PSG9")
+                st.subheader("สถานะการแก้ไขในแต่ละหมวดหมู่มาตรฐานสำคัญจำเป็นฯ")
 
                 # ✅ แก้ไข: ใช้ df_filtered
                 psg9_categories = {k: v for k, v in PSG9_label_dict.items() if
