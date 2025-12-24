@@ -1,12 +1,11 @@
 # File: ai_assistant.py
 
-import os
-import json
+# ==============================================================================
+# IMPORT LIBRARIES
+# ==============================================================================
+import pandas as pd
 import re
 from datetime import datetime
-from typing import Optional, List, Dict, Tuple, Set
-
-import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 
@@ -15,236 +14,25 @@ try:
 except ImportError:
     genai = None
 
-
-
-# --- Minimal RAG / top-k retriever (no extra dependencies) --------------------
-# เก็บฐานความรู้ในไฟล์ JSONL (หนึ่งบรรทัด = 1 เอกสารย่อย) แล้วดึงเฉพาะส่วนที่เกี่ยวข้องมาใส่ prompt ต่อเคส
-# ช่วยลด token/ค่าใช้จ่าย และเลี่ยงการยัด "ฐานความรู้ทั้งก้อน" เข้า prompt ทุกครั้ง
-#
-# โครงสร้างไฟล์: knowledge_base.jsonl (วางไว้โฟลเดอร์เดียวกับไฟล์นี้)
-# แต่ละบรรทัดเป็น JSON เช่น:
-# {"id":"code_def:...", "type":"code_def|kb3p", "codes":["CPE101"], "text":"..."}
-#
-# หมายเหตุ: ตัว retriever นี้ใช้การเทียบความคล้ายแบบ character n-gram (เหมาะกับภาษาไทย/อังกฤษแบบไม่ต้องตัดคำ)
-_KB_CACHE: Optional[List[Dict]] = None
-_KB_NGRAM_CACHE: Optional[List[Set[str]]] = None
-
-def _kb_default_path() -> str:
-    # ใช้ไฟล์ที่อยู่ข้าง ๆ สคริปต์นี้เป็นค่าเริ่มต้น (override ได้ด้วย env KB_PATH)
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.getenv("KB_PATH", os.path.join(base_dir, "knowledge_base.jsonl"))
-
-def _norm_text(s: str) -> str:
-    s = (s or "").lower()
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def _char_ngrams(s: str, n: int = 2) -> Set[str]:
-    s = _norm_text(s)
-    s = s.replace(" ", "")
-    if len(s) <= n:
-        return {s} if s else set()
-    return {s[i:i+n] for i in range(len(s) - n + 1)}
-
-def _load_kb_once(kb_path: Optional[str] = None) -> None:
-    global _KB_CACHE, _KB_NGRAM_CACHE
-    if _KB_CACHE is not None and _KB_NGRAM_CACHE is not None:
-        return
-
-    path = kb_path or _kb_default_path()
-    docs: List[Dict] = []
-    ngrams: List[Set[str]] = []
-
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    txt = obj.get("text", "")
-                    docs.append(obj)
-                    ngrams.append(_char_ngrams(txt))
-                except Exception:
-                    # ข้ามบรรทัดที่ไม่ใช่ JSON
-                    continue
-    except FileNotFoundError:
-        # ถ้าไม่มีไฟล์ KB จะยังทำงานได้ (retrieved_knowledge จะว่าง)
-        docs, ngrams = [], []
-
-    _KB_CACHE, _KB_NGRAM_CACHE = docs, ngrams
-
-def retrieve_relevant_knowledge(query: str, top_k: int = 12, kb_path: Optional[str] = None, max_chars: int = 5000) -> str:
-    """
-    ดึงความรู้ที่เกี่ยวข้องกับ query แบบ top-k แล้วคืนเป็นข้อความ (พร้อมป้าย type/codes)
-    - top_k: จำนวนเอกสารย่อยที่จะดึง
-    - max_chars: ตัดความยาวรวมของ context เพื่อไม่ให้ prompt ใหญ่เกินจำเป็น
-    """
-    _load_kb_once(kb_path)
-    if not _KB_CACHE or not _KB_NGRAM_CACHE:
-        return "(ไม่พบไฟล์ฐานความรู้ knowledge_base.jsonl หรือฐานความรู้ยังว่าง)"
-
-    qset = _char_ngrams(query)
-    if not qset:
-        return "(query ว่าง จึงไม่สามารถดึงฐานความรู้ได้)"
-
-    scored: List[Tuple[float, int]] = []
-    for i, dset in enumerate(_KB_NGRAM_CACHE):
-        if not dset:
-            continue
-        inter = len(qset & dset)
-        if inter == 0:
-            continue
-        # Jaccard similarity
-        score = inter / (len(qset | dset) + 1e-9)
-        scored.append((score, i))
-
-    if not scored:
-        return "(ไม่พบส่วนที่ match ในฐานความรู้ — จะวิเคราะห์จากข้อความเคสเป็นหลัก)"
-
-    scored.sort(reverse=True, key=lambda x: x[0])
-    picked = [i for _, i in scored[:max(1, top_k)]]
-
-    chunks: List[str] = []
-    total = 0
-    for i in picked:
-        doc = _KB_CACHE[i]
-        dtype = doc.get("type", "kb")
-        codes = doc.get("codes") or []
-        codes_txt = f" | codes: {', '.join(codes)}" if codes else ""
-        txt = (doc.get("text") or "").strip()
-
-        # ตัดต่อชิ้นเพื่อกันยาวเกิน
-        if len(txt) > 900:
-            txt = txt[:900].rstrip() + "…"
-
-        piece = f"- [{dtype}]{codes_txt}\n  {txt}"
-        if total + len(piece) > max_chars:
-            break
-        chunks.append(piece)
-        total += len(piece)
-
-    return "\n".join(chunks) if chunks else "(ดึงฐานความรู้ได้ แต่ถูกตัดด้วย max_chars)"
-
-# ------------------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------------------
-_FENCE_RE = re.compile(r"```(?:html|markdown|md|json)?\s*|\s*```", re.IGNORECASE)
-
-def _strip_code_fences(text: str) -> str:
-    if not text:
-        return ""
-    return _FENCE_RE.sub("", text).strip()
-
-def _get_api_key() -> Optional[str]:
-    # ปรับชื่อตัวแปรตามที่คุณใช้จริงบน Render ได้เลย
-    return (
-        os.getenv("GEMINI_API_KEY")
-        or os.getenv("GOOGLE_API_KEY")
-        or os.getenv("GOOGLE_GENERATIVEAI_API_KEY")
-    )
-
-def _configure_genai_if_possible() -> None:
-    """
-    ปลอดภัยไว้ก่อน: ถ้ามี API key ใน env ก็ configure ให้
-    (ถ้าคุณ configure ไว้ที่อื่นแล้ว ฟังก์ชันนี้จะไม่ทำให้พัง)
-    """
-    if not genai:
-        return
-    api_key = _get_api_key()
-    if api_key:
-        try:
-            genai.configure(api_key=api_key)
-        except Exception:
-            # เงียบไว้เพื่อไม่ให้ทำให้ระบบเดิมล่ม
-            pass
-
-
-# ------------------------------------------------------------------------------
-# NEW: Appendix to make Step-2 planning more reliable
-# ------------------------------------------------------------------------------
-PLANNING_INPUTS_APPENDIX = r"""
-**ข้อกำหนดเพิ่มเติม (สำคัญมาก):**
-หลังจากตอบครบทุกหัวข้อเดิมแล้ว ให้เพิ่มหัวข้อท้ายสุดชื่อ:
-
-### 8. ประมวลผลเพื่อจัดทำแผนพัฒนา 
-ให้สรุปเป็นรายการสั้นๆ (bullet) โดยต้องมีอย่างน้อย:
-- Immediate containment (ทำทันทีภายใน 24-72 ชม.)
-- Root drivers / system gaps (ตัวขับหลัก 3-5 ข้อ)
-- “จุดเปลี่ยนสำคัญ” ที่ถ้าปรับจะลดความเสี่ยงได้มาก (Turning points 2-3 ข้อ)
-- Data needed (ข้อมูลที่ต้องเก็บเพิ่มเพื่อยืนยันสมมติฐาน)
-- Stakeholders/Owners (ใครควรเป็นเจ้าภาพหลัก)
-"""
-
-
-# ------------------------------------------------------------------------------
-# NEW: Step-2 prompt (Executive Summary + Potential Change + KPI Plan)
-# ------------------------------------------------------------------------------
-EXECUTIVE_PLAN_PROMPT_TEMPLATE = r"""
-คุณคือ "ที่ปรึกษาคุณภาพและความปลอดภัยของโรงพยาบาล" (บริบทประเทศไทย)
-
-ผู้ใช้ให้รายละเอียดอุบัติการณ์ดังนี้:
-{incident_description}
-
-และมีผลวิเคราะห์เชิงเทคนิค (หัวข้อ 1-6) จาก AI แล้วด้านล่างนี้:
-{consultation_text}
-
-งานของคุณ: เขียน "ส่วนเพิ่มเติม" ต่อท้ายผลเดิม โดยต้องมีแค่ 2 หัวข้อดังนี้ และเขียนเป็น Markdown เท่านั้น (ห้ามเขียนโค้ดบล็อก)
-
-### 9. แผนพัฒนา (Creative Solution & KPI)
-
-ให้สรุป "Potential Change" จำนวน 3–5 ข้อ ที่ “ต่อยอด” จากข้อ 4–6 (ไม่ทวนข้อความเดิมซ้ำยาว ๆ)  
-จากนั้นให้จัดทำ **ตารางแผนพัฒนา** ตามรูปแบบด้านล่างอย่างเคร่งครัด
-
-**ข้อกำหนดสำคัญ**
-- 1 Potential Change = 1 แถวในตาราง
-- Key Actions ให้ใส่ 2–4 ข้อ (เขียนแบบสั้น กระชับ)
-- SMART KPI ให้ใส่ 1–2 ตัว/แถว และต้องระบุ “นิยาม/สูตร” ให้ชัดเจน
-- Timeline ให้ระบุช่วงเวลา เช่น “ภายใน 30 วัน”, “ไตรมาส 1/2569”, “ภายใน 6 เดือน” เป็นต้น
-- Owner ระบุทีม/หน่วยงาน/บทบาทที่เหมาะสม (เช่น ER, Ward, QI, PTC, Nursing, RRT)
-
-**รูปแบบการตอบ: ต้องเป็นตาราง Markdown เท่านั้น**
-
-| Potential Change | Goal (เป้าหมาย) | Key Actions (2–4 ข้อ) | Owner | Timeline | KPI (นิยาม/สูตร) |
-|---|---|---|---|---|---|
-| ... | ... | 1) ...<br><ul><li>2) ...</li><li>3) ...<ul><li> | ... | ... | - KPI1: ... (นิยาม/สูตร: ...)<ul><li>- KPI2: ... (นิยาม/สูตร: ...)<ul><li> |
-
-### 10. บทสรุปผู้บริหาร (Executive Summary)
-- 5-7 บรรทัด อ่านเร็ว เข้าใจภาพรวม
-- ครอบคลุม: เหตุการณ์/ความเสี่ยงหลัก, ความรุนแรงที่คาด, ประเด็นสาเหตุร่วมสำคัญ, มาตรการเร่งด่วน 1-2 ข้อ
-
-ข้อกำหนดเพิ่มเติม:
-- หลีกเลี่ยงความซ้ำซ้อนกับหัวข้อ 1-7 (อ้างอิงกลับได้ แต่ไม่คัดลอกซ้ำ)
-
-"""
-
-
 # ==============================================================================
-# AI FUNCTION 2: CASE CONSULTATION (Upgraded)
+# AI FUNCTION 2: CASE CONSULTATION
 # ==============================================================================
 def get_consultation_response(incident_description: str) -> str:
     """
-    อัปเกรดให้ทำงาน 2 ขั้น:
-    Step 1: วิเคราะห์เชิงเทคนิค + ให้รหัส/ความรุนแรง/ปัจจัยร่วม (อิงฐานความรู้เดิม)
-    Step 2: สร้างบทสรุปผู้บริหาร + potential change + KPI + PDSA + action plan
+    สร้าง Prompt ที่มี Knowledge Base ในตัว และเรียก Gemini API
+    เพื่อทำหน้าที่เป็นที่ปรึกษาด้านการบริหารความเสี่ยงสำหรับอุบัติการณ์ที่เกิดขึ้น
     """
     if not genai:
         return "ขออภัยครับ ไลบรารี google.generativeai ไม่ได้ถูกติดตั้ง"
 
-    _configure_genai_if_possible()
- 
-
-    # --- RAG: ดึงฐานความรู้เฉพาะส่วนที่เกี่ยวข้อง (top-k) ---
-    retrieved_knowledge = retrieve_relevant_knowledge(incident_description, top_k=12)
+    # --- Master Prompt พร้อมฐานข้อมูลความรู้ในตัว (เวอร์ชันอัปเดต) ---
     master_prompt = f"""
     **บทบาท:**
     คุณคือ "ผู้ช่วย AI ด้านการจัดการความเสี่ยง" (AI Risk Management Assistant) มีหน้าที่ช่วยสรุปข้อมูลและให้ข้อเสนอแนะเบื้องต้น สำหรับการรายงานอุบัติการณ์ไปยังระบบ NRLS & HRMS
     
     **แนวทางการตอบ:**
     1.  **เสนอเป็นทางเลือก:** ให้คำตอบของคุณอยู่ในรูปแบบของ "ข้อเสนอแนะ", "แนวทางที่เป็นไปได้" หรือ "ข้อมูลเพื่อประกอบการพิจารณา" เสมอ ไม่ใช่คำสั่งหรือคำตอบที่สิ้นสุด
-    2.  **ย้ำเตือนบทบาทของผู้ใช้:** ก่อนเริ่มคำแนะนำ ให้มีประโยคที่ส่งเสริมให้ผู้ใช้เป็นผู้ตัดสินใจเสมอ เช่น "โปรดใช้ข้อมูลนี้ร่วมกับวิจารณญาณและประสบการณ์ของผู้เชี่ยวชาญในการตัดสินใจขั้นสุดท้าย"
-    3. **หากข้อมูลไม่พอ ให้ระบุ "ข้อมูลที่ควรถามเพิ่ม" แบบสั้น ๆ ด้านบนเลย (ทำตัวอักษรเอียง และไม่ต้องถามกลับผู้ใช้)
+    2.  **ย้ำเตือนบทบาทของผู้ใช้:** ในตอนท้ายของคำแนะนำ ให้มีประโยคที่ส่งเสริมให้ผู้ใช้เป็นผู้ตัดสินใจเสมอ เช่น "ทั้งนี้ โปรดใช้ข้อมูลนี้ร่วมกับวิจารณญาณและประสบการณ์ของผู้เชี่ยวชาญในการตัดสินใจขั้นสุดท้าย"
     
     **ข้อห้าม:**
     - ห้ามให้คำตอบที่เด็ดขาด ฟันธง หรือรับประกันความถูกต้อง 100%
@@ -257,8 +45,328 @@ def get_consultation_response(incident_description: str) -> str:
     **ฐานข้อมูลความรู้:**
     ---
     [รหัส NRLS & HRMS]
-    (ดึงเฉพาะส่วนที่เกี่ยวข้อง (top-k) ต่อเคสจากไฟล์ knowledge_base.jsonl)
-    {retrieved_knowledge}
+   CSD101 เกิดปัญหาใน Dental Tx ผู้ป่วยโรค DM เช่น Hypo-Hyperglycemia/แผลหายช้า/Advance Periodontitis
+    CSD102 เกิดปัญหาใน Dental Tx in Hemorrhagic disorders เช่น Spontaneous or prolong bleeding/Delayed healing
+    CSD103 เกิด Airway obstruction ในโรค Ludwig's Angina
+    CSD104 เกิด Allergy to Local anesthesia ใน Dental Tx
+    CSD105 เกิด Chest pain/Acute MI ใน Dental Tx ผู้ป่วยโรค Angina pectoris or MI
+    CSD106 เกิด Subacute bacterial endocarditis ใน Dental Tx ผู้ป่วยโรคลิ้นหัวใจหรือใส่ลิ้นหัวใจเทียม
+    CSD107 เกิด Tumor that extends to malignancy ในโรค Oral lesion แผลในช่องปาก
+    CSD108 เกิดภาวะฉุกเฉินใน Emergency in dental clinic เช่น Syncope/Hyperventilation/Toxic effect of local anesthesia
+    CSD109 เกิดภาวะแทรกซ้อนในผู้ป่วย Head and neck cancer therapy เช่น Osteoradionecrosis/Halitosis/Mucositis
+    CSD110 เกิดภาวะแทรกซ้อนใน Oral surgery/Simple-Surgical extraction เช่น Bleeding/Pain and Swelling/Fibrinolytic alveolitis
+    CSD111 แผลถอนฟันหายช้าและติดเชื้อ ในผู้ป่วย HIV/Immunosuppressive/On steroid
+    GOE101 เกิดปัญหาด้านการควบคุมการเงิน เช่น ไม่กำหนดระเบียบ/ผู้รับผิดชอบ, ไม่มีเอกสารหลักฐานกำกับ, ขาดการตรวจสอบหรือสอบทาน เป็นต้น
+    GOE201 เกิดปัญหาด้านการควบคุมงบประมาณ เช่น ไม่กำหนดระเบียบ/ผู้รับผิดชอบ, ไม่มีทะเบียนคุม/เอกสารหลักฐานกำกับ, ขาดการตรวจสอบหรือสอบทาน เป็นต้น
+    CPE101 Un-planed Cardiopulmonary Resuscitation (CPR)
+    CPE201 Sepsis with death
+    CPE202 ผู้ป่วย Acute Coronary Syndrome ไม่ได้รับการตรวจรักษาในช่วงเวลา golden period
+    CPE203 Acute Ischemic Stroke ที่ให้การรักษาไม่ทัน golden period
+    CPE204 เกิดภาวะแทรกซ้อนจากการทำ Cardiopulmonary Resuscitation (CPR)
+    CPE301 PPH with Complicate
+    CPE302 มารดาเสียชีวิตจากการคลอด
+    CPE303 ทารกเสียชีวิตจากการคลอด
+    CPE304 ภาวะแทรกซ้อนจากการคลอดที่ป้องกันได้เกิดขึ้นกับมารดา
+    CPE305 ภาวะแทรกซ้อนจากการคลอดที่ป้องกันได้เกิดขึ้นกับทารก (Birth injury)
+    CPE306 Severe Birth Asphyxia
+    CPE401 ผู้ป่วยฉุกเฉินไม่ได้รับการตรวจรักษาภายในระยะเวลา 30 นาที
+    CPE402 Under triage
+    CPE403 Over triage
+    CPE404 ผู้ป่วยไม่รอตรวจ ไม่พึงพอใจ ร้องเรียน
+    CPE405 Delay Diagnosis and Delay treatment ในผู้ป่วย ฉุกเฉิน และผู้ป่วย Fast Track
+    CPE406 ผู้ป่วยเสียชีวิตที่ห้องฉุกเฉินระหว่างรอการตรวจรักษา
+    CPE407 Missed Diagnosis
+    CPE408 Un-planed ICU ในผู้ป่วยฉุกเฉิน/ผู้ป่วยวิกฤติ
+    CPE409 ผู้ป่วยได้รับการตรวจรักษาในห้องฉุกเฉินนานมากกว่า 2 ชั่วโมงก่อน Admit หรือนานมากกว่า 4 ชั่วโมงก่อนการจำหน่ายกลับบ้าน
+    CPE410 เกิดอุบัติภัยหมู่ที่ให้ความช่วยเหลือได้ไม่ทันเวลา
+    CPE411 เกิด disaster หรือภาวะฉุกเฉินที่ไม่พึงประสงค์ต่างๆ ที่ ER
+    GPE101 อันตรายจากโครงสร้างอาคารสถานที่และสิ่งแวดล้อมเชิงกายภาพ เช่น แสง เสียง ฝุ่นละออง มีเชื้อรา เป็นต้น
+    GPE102 ห้องแยกโรค/Isolation room มีการระบายอากาศไม่เหมาะสม และ/หรือ ไม่เป็นไปตามเกณฑ์มาตรฐาน
+    GPE201 บุคลากรได้รับผลกระทบ Psychosocial factors จากผู้บังคับบัญชา หรือเพื่อนร่วมงาน
+    GPE202 บุคลากรไม่มี work-life balance
+    GPE203 บรรยากาศในการทำงานและสภาวะแวดล้อมไม่เหมาะสม
+    GPE204 บุคลากรได้ทำงานในตำแหน่งที่ไม่มีความชำนาญ และไม่มีการเตรียมความพร้อม
+    GPE205 เกิดปัญหาด้านการจัดการสภาพแวดล้อมในการให้บริการ เช่น ไม่มีป้ายให้คำแนะนำ/บอกทาง, ไม่มีทางหนีไฟหรือมีแต่ไม่พร้อมใช้/มีสิ่งกีดขวาง, ลิฟต์ขัดข้อง มีคนติดในลิฟต์ หรือ ลิฟต์ไม่พร้อมใช้งาน/ชำรุด/ติดค้าง
+    GPE206 เกิดปัญหาด้านการควบคุมสิ่งแวดล้อมในสถานที่ทำงาน เช่น ระบบน้ำอุปโภค-บริโภคไม่เพียงพอ/ไม่พร้อมใช้, ระบบไฟฟ้าไม่เพียงพอ ไม่พร้อมใช้/ดับ/ช็อต/กระพริบ, การบำบัดน้ำเสีย/กำจัดขยะ ไม่ถูกวิธี/ไม่ได้มาตรฐาน
+    GPE207 เกิดปัญหาความไม่ปลอดภัย/ขาดการปฏิบัติหรือไม่ปฏิบัติตามนโยบายความปลอดภัย เช่น ทรัพย์สินสูญหาย/ถูกลักขโมย เป็นต้น
+    GPE301 บุคลากรได้รับภัยคุกคามหรือถูกทำร้ายทางวาจาจากบุคคลภายใน
+    GPE302 บุคลากรได้รับภัยคุกคามหรือถูกทำร้ายทางกายจากบุคคลภายใน
+    GPE303 บุคลากรได้รับภัยคุกคามหรือถูกทำร้ายทางวาจาจากผู้ป่วยและญาติหรือบุคคลภายนอก
+    GPE304 บุคลากรได้รับภัยคุกคามหรือถูกทำร้ายทางกายจากผู้ป่วยและญาติหรือบุคคลภายนอก
+    GPE305 เกิดกรณีความไม่สงบในสถานพยาบาล เช่น เมาสุราอาละวาด 
+    CSE101 Iris prolapsed ใน ECCE
+    CSE102 Rupture posterior capsule ใน ECCE
+    CSE103 Rupture posterior capsule ใน Phaco with IOL
+    CSE104 กระจกตาบวม ใน ECCE
+    CSE105 กระจกตาบวม ใน Phaco with IOL
+    CSE106 Endophthalmitis ใน ECCE  
+    CSE107 Endophthalmitis ใน Phaco with IOL  
+    CSE108 Endophthalmitis ใน Intravitreous  
+    CSE201 เกิดภาวะแทรกซ้อนในการทำ Tracheostomy Tube (เช่น Subcutaneous Emphysema/Bleeding/Pneumothorax/T-E fistula/Nerve injury)
+    CSE202 เกิดภาวะแทรกซ้อนใน Thyroidectomy (เช่น Nerve injury/Hematoma/Hypoparathyroidism/Dysphagia)
+    CSE203 เกิดภาวะแทรกซ้อนใน Tonsillectomy (เช่น Bleeding/Nasopharyngeal stenosis)
+    CSG101 เกิดปัญหา in VBAC (Vaginal Birth after Cesarean) เช่น Uterine rupture/ตกเลือด
+    CSG102 เกิดปัญหาใน Preeclampsia (เช่น Eclampsia/HELLP Syndrome/Severe eclampsia/Abruption/SE from MgSO4)
+    CSG103 เกิดปัญหาใน Pregnancy with GDM (เช่น Polyhydramnios/PIH/Macrosomia/DFIU)
+    CSG104 เกิดปัญหาใน Pregnancy with HIV เช่น M-F transmission
+    CSG105 เกิดภาวะวิกฤติใน Placenta Previa (เช่น APH/PPH)
+    CSG106 เกิดภาวะแทรกซ้อนใน Amniocentesis (เช่น Haemorrhage/Sepsis/Fetal loss/Abort/Uterine contraction)
+    CSG107 เกิดปัญหาใน Premature Contraction (เช่น Preterm labour/SE from Inhibit)
+    CSG201 เกิดปัญหาใน Twin (เช่น Preterm labour/PROM/ PPH/Birth asphyxia/PIH/Discordant twin)
+    CSG301 เกิด TOA (Tubo-ovarian abscess) ใน PID (Pelvic Inflammatory Disease)
+    CSG302 เกิดภาวะวิกฤติ ใน Abort (เช่น Embolism/Shock)
+    CSG303 เกิดภาวะวิกฤติใน Ectopic pregnancy (เช่น Rupture/Shock)
+    CSG304 เกิดภาวะวิกฤติใน Ovarian tumor (เช่น Rupture/Twist)
+    CSG305 เกิดภาวะแทรกซ้อนใน CIN (Cervical of intraepithelial neoplasia) (เช่น Persistence/Recurrent/CA Cervix)  
+    CSG306 เกิดภาวะแทรกซ้อนใน Myoma uteri (เช่น Hypermenorrhea/Infertile/Urinary Incontenence)
+    GPI101 บุคลากรถูกวัสดุอุปกรณ์มีคมทิ่มตำ
+    GPI102 บุคลากรสัมผัสเลือดหรือสารคัดหลั่งบริเวณเยื่อบุหรือผิวหนังที่มีแผล (mucous membrane and non-intact skin exposure to blood and body fluid)
+    GPI103 บุคลากรไม่ได้รับการสร้างภูมิคุ้มกันโรคก่อนสัมผัส (pre-exposure prophylaxis, active immunization) ที่เหมาะสมตามลำดับความสำคัญและหน้าที่
+    GPI104 บุคลากรไม่ได้รับการป้องกันการติดเชื้อหลังสัมผัสเชื้อที่อาจก่อโรคได้จากการปฏิบัติงาน (post-exposure prophylaxis, passive immunization)
+    GPI201 บุคลากรติดเชื้อที่แพร่ทางอากาศ (airborne transmission) จากการปฏิบัติงาน ได้แก่ วัณโรค หัด และอีสุกอีใส
+    GPI202 บุคลากรติดเชื้อที่แพร่ผ่านละอองฝอย (droplet transmission) จากการปฏิบัติงาน เช่น ไข้หวัดใหญ่ หัดเยอรมัน ฯลฯ
+    GPI203 บุคลากรติดเชื้อที่แพร่ทางการสัมผัส (contact transmission) จากการปฏิบัติงาน เช่น เอชไอวี ตับอักเสบบี ตับอักเสบซี ฯลฯ
+    GPI204 บุคลากรติดเชื้อที่แพร่ผ่านพาหะ (vector borne transmission) จากการปฏิบัติงาน เช่น ไข้เลือดออก ซิก้า ฯลฯ
+    CPI101 ไม่ล้างมือ/ล้างไม่เหมาะสมตามข้อบ่งชี้ของการทำความสะอาดมือ (5 moments for hand hygiene)
+    CPI201 CAUTI: Catheter Associated Urinary Tract Infection
+    CPI202 VAP: Ventilator-Associated Pneumonia
+    CPI203 CLABSI: Central Line-Associated Bloodstream Infection
+    CPI204 การไม่ปฏิบัติตามแนวทางป้องกันการแพร่กระจายเชื้อก่อโรคในสถานพยาบาล Standard Precautions (ยกเว้นการล้างมือ) 
+    CPI205 เกิดการติดเชื้อในกระแสโลหิตจากการสอดใส่สายสวนทางหลอดเลือดดำส่วนปลาย (Peripheral Line Associated Bloodstream -PLABSI)
+    CPI301 การเกิดระบาดโรคอุบัติใหม่ อุบัติซ้ำ
+    CPI302 เกิดการระบาดของโรคที่ป้องกันได้ด้วยวัคซีน (Vaccine Preventable Disease) ภายในโรงพยาบาล
+    CPI303 เกิดการระบาดของโรคติดต่ออื่นๆ (Other Communication Disease) ภายในโรงพยาบาล
+    CPI401 การเกิดการติดเชื้อดื้อยา
+    GOI101 เกิดปัญหาด้าน Hardware/อุปกรณ์คอมพิวเตอร์ เช่น ไม่มีแผนบริหารจัดการ/ไม่เพียงพอ/ไม่พร้อมใช้/ใช้ไม่ตรงวัตถุประสงค์/ใช้ผิดวิธี- เทคนิค
+    GOI102 เกิดปัญหาด้าน Network & Security เช่น ไม่พร้อมใช้/ระบบล่ม/มีการเข้าถึงโดยผู้ไม่มีสิทธิ์
+    GOI103 เกิดปัญหาด้าน Software เช่น ไม่เข้ากับ hardware/ไม่พร้อมใช้/ไม่ตอบสนองความต้องการ/ใช้ผิดวิธี-เทคนิค
+    GOI104 เกิดปัญหาด้าน User & IT Team เช่น ไม่มอบหมายผู้รับผิดชอบ/ไม่พร้อม/ไม่ครอบคลุมบทบาทหน้าที่/ขาดความรู้และทักษะ
+    GOI105 เกิดปัญหาด้านข้อมูล สารสนเทศ เช่น ไม่ถูกต้อง/ไม่ครบถ้วน/ไม่น่าเชื่อถือ/ไม่เป็นปัจจุบัน
+    GOI106 เกิดปัญหาด้านระบบ/กระบวนการสื่อสาร เช่น ไม่มีแผน/วิธีการหรือช่องทางการสื่อสาร, ไม่สื่อสารหรือสื่อสารไม่ต่อเนื่อง/ไม่ครบถ้วน, ขาดการติดตามประเมินผลการสื่อสาร
+    GOI107 โปรแกรม/ระบบสารสนเทศทางการแพทย์ เช่น HIS, LIS, โปรแกรมระบบยา ล่ม/ไม่สามารถใช้งานได้ นานเกินกว่าระยะเวลาที่ประกันเวลาไว้
+    GOI108 โปรแกรม/ระบบสารสนเทศการบริการอื่นๆ ที่ไม่ใช่บริการทางการแพทย์ ล่ม/ไม่สามารถใช้งานได้ นานเกินกว่าระยะเวลาที่ประกันเวลาไว้
+    GOI201 เกิดปัญหาด้านการควบคุมทรัพย์สิน เช่น ไม่กำหนดระเบียบ/ผู้รับผิดชอบ, ไม่มีทะเบียนคุม/เอกสารหลักฐานกำกับ, ขาดการตรวจสอบหรือสอบทาน
+    GOI202 เกิดปัญหาด้านระบบบริหารการพัสดุ เช่น ไม่กำหนดระเบียบ/แผนความต้องการและการจัดหา, ไม่มีทะเบียนคุม/การตรวจรับ/การบำรุงรักษา, ขาดการควบคุมการแจกจ่าย/การจำหน่าย
+    GOI203 เกิดปัญหาด้านการควบคุมการใช้ทรัพยากร เช่น จัดสรรไม่เหมาะสม/ใช้ไม่คุ้ม-ไม่ถูกตามมาตรฐาน/บุคลากรไม่ปฏิบัติตามข้อกำหนด-ขาดทักษะการใช้
+    GOI204 เกิดปัญหาด้านอุปกรณ์เทคโนโลยีทางการแพทย์/เครื่องมือ-อุปกรณ์การแพทย์ที่ไม่ใช่เครื่องมือ-อุปกรณ์ผ่าตัด (Error of Medical device) เช่น ไม่มีแผนบริหารจัดการ/ไม่เพียงพอ/ไม่พร้อมใช้/ใช้ไม่ตรงวัตถุประสงค์/ใช้ผิดวิธี-เทคนิค
+    GOI205 เกิดปัญหาด้านเครื่องมือ อุปกรณ์สำนักงาน หรือ เครื่องมือ อุปกรณ์อื่นๆ ที่ไม่ใช่เทคโนโลยีหรือเครื่องมือ-อุปกรณ์การแพทย์ เช่น ไม่มีแผนบริหารจัดการ/ไม่เพียงพอ/ไม่พร้อมใช้/ใช้ไม่ตรงวัตถุประสงค์/ใช้ผิดวิธี- เทคนิค
+    GOI206 เกิดปัญหาด้านเวชภัณฑ์ทางการแพทย์/เวชภัณฑ์ที่ไม่ใช่ยา เช่น ไม่มีแผนบริหารจัดการ/ไม่มีคุณภาพ/ไม่เพียงพอ/หมดอายุหรืออยู่ในสภาพไม่พร้อมใช้งาน  
+    GOI207 เกิดปัญหาด้านเวชภัณฑ์ยา เช่น ไม่มีแผนบริหารจัดการ/ไม่มีคุณภาพ/ไม่เพียงพอ/หมดอายุหรืออยู่ในสภาพไม่พร้อมใช้งาน
+    GPL101 อุปกรณ์บนรถพยาบาลไม่พร้อมใช้ ไม่เหมาะสมและไม่ปลอดภัยสำหรับการส่งต่อผู้ป่วย
+    GPL102 บุคคลากรที่เกิดอุบัติเหตุจากการคมนาคมหรือการเดินทางโดยระบบขนส่งสาธารณะระหว่างการปฏิบัติงาน
+    GPL103 บุคลากรเสียชีวิตหรือบาดเจ็บจากการปฏิบัติหน้าที่ระหว่างการส่งต่อผู้ป่วยด้วยรถพยาบาล
+    GPL104 เกิดอุบัติเหตุของรถพยาบาลระหว่างปฏิบัติหน้าที่
+    GPL105 พนักงานขับรถมีสภาพไม่พร้อมสมบูรณ์สำหรับการขับรถพยาบาล เช่น พักผ่อนน้อย อายุมาก ดื่มสุรา
+    GPL106 พนักงานขับรถไม่ปฏิบัติตามแนวทางความปลอดภัยของรถบริการการแพทย์ฉุกเฉิน และรถพยาบาล เช่น ขับรถเร็วเกินกว่ากำหนด
+    GPL201 บุคลากรไม่ปฏิบัติตามแนวทางการให้ข้อมูลด้านสุขภาพแก่ผู้รับบริการ 
+    GPL202 บุคลากรให้ข้อมูลไม่ครบถ้วนแก่ผู้ป่วยและญาติ
+    GPL203 บุคลากรบันทึกข้อมูลในเวชระเบียนไม่ครบถ้วน ไม่ถูกต้อง
+    GPL204 บุคลากรแก้ไขข้อมูลในเวชระเบียนโดยไม่ถูกต้องตามแนวทางและข้อกำหนดตามกฎหมาย
+    GPL205 เกิดปัญหาด้านการบริหารจัดการ/การเก็บรักษาเวชระเบียน เช่น เวชระเบียนสูญหาย ผู้ป่วยคนเดียวมีเวชระเบียนสองฉบับ เป็นต้น
+    GOL101 เกิดปัญหาด้านการควบคุม กำกับดูแลด้านวิชาชีพ เช่น บุคลากรมีคุณสมบัติไม่เหมาะสมตามมาตรฐานวิชาชีพ, ละเลยการปฏิบัติหน้าที่ หรือปฏิบัติหน้าที่โดยไม่ใช้ความรู้ตามหลักวิชาการ, ประพฤติตนและประกอบกิจแห่งวิชาชีพโดยไม่ถูกต้องตามกฎหมาย
+    GOL102 เกิดเหตุการณ์การทุจริตในหน้าที่ หรือปฏิบัติโดยมีอคติ และ/หรือใช้อำนาจหน้าที่เพื่อผลประโยชน์ส่วนตน
+    CPL101 ท่อ เลื่อนหลุดเกิด re-intubation
+    CPL102 Mis-connect, Dis-connect
+    CPL103 ความคลาดเคลื่อนการให้สารน้ำจากการใช้ Infusion pump
+    CPL201 ผลการตรวจวิเคราะห์ทางห้องปฏิบัติการผิดพลาด ล่าช้า หรือไม่สามารถปฏิบัติการตรวจวิเคราะห์ได้
+    CPL202 สิ่งส่งตรวจไม่ถูกต้อง ไม่เหมาะสม หรือไม่มีสิ่งส่งตรวจ
+    CPL203 เตรียมตรวจ/ตรวจทางรังสีผิดพลาด (เช่น ผิดประเภท/ผิดคำสั่ง/ผิดตำแหน่ง/ผิดข้าง/ผิดเทคนิคการตรวจ)
+    GOM101 เกิดปัญหาด้านการรับสมัคร บรรจุ แต่งตั้งบุคลากร เช่น ไม่มีการกำหนดกระบวนการคัดเลือก/ทักษะและความสามารถที่จำเป็นกับตำแหน่ง, ไม่มีการเผยแพร่ข้อมูลการรับสมัคร/การสอบคัดเลือก, ไม่มีคำสั่งเป็นลายลักษณ์อักษรโดยผู้บริหารสูงสุด
+    GOM102 เกิดปัญหาด้านการบริหารจัดการเกี่ยวกับบุคลากร เช่น ไม่กำหนดหน้าที่ความรับผิดชอบ/การเปลี่ยนแปลงที่สำคัญเกี่ยวกับการมอบหมายงานเป็นลายลักษณ์อักษร, ไม่มีการจัดทำแนวทางการปฏิบัติเรื่องค่าตอบแทน, การเลื่อนขั้นเงินเดือนไม่มีการพิจารณาอนุมัติและจัดทำเป็นลายลักษณ์อักษร
+    GOM103 เกิดปัญหาด้านการพัฒนาบุคลากร เช่น ไม่มีการจัดสรรงบประมาณ/ทรัพยากร/เครื่องมือ และการจัดฝึกอบรม, ไม่มีการพิจารณาความต้องการฝึกอบรมของบุคลากรเพื่อพัฒนาทักษะ
+    GOM201 เกิดปัญหาด้านการควบคุมสภาพแวดล้อมของการดำเนินงาน เช่น เอกสารกระบวนการดำเนินงานไม่เป็นปัจจุบัน/ไม่มีกฎ ระเบียบ ความรับผิดชอบที่ชัดเจน/ขาดการติดตามผลและวางแผนป้องกัน
+    CSM101 เกิด Hypoxemia/Respiratory failure ใน Exacerbation of COPD  
+    CSM102 เกิด Hypoxemia/Respiratory failure ใน Severe asthma   
+    CSM103 เกิด Hypoxemia/Respiratory failure ในโรค Avian influenza   
+    CSM104 เกิด Hypoxemia/Respiratory failure ในโรค H1N1 influenza  
+    CSM105 เกิด Hypoxemia/Respiratory failure ในโรค SARS
+    CSM106 เกิดภาวะ Hypoxemia/Pneumothorax ในโรค PCP
+    CSM107 เกิดภาวะ Hypoxemia/Respiratory failure ในโรค TB Lung
+    CSM201 เกิด CHF/Arrhythmia/Cardiogenic shock ใน AMI
+    CSM301 เกิดภาวะ Hypokalemia ในโรค Acute/Chronic Diarrhea
+    CSM302 เกิดภาวะ Hypovolemic Shock ในโรค Acute/Chronic Diarrhea
+    CSM303 เกิดภาวะ Hypovolemic Shock ในโรค UGI Bleeding
+    CSM401 เกิดภาวะ Brain herniation ในโรค Toxoplasmosis
+    CSM402 เกิดภาวะ Brain herniation ในโรค CVA
+    CSM403 เกิดภาวะ Aspirate pneumonia ในโรค CVA
+    CSM404 เกิดภาวะ IICP ในโรค Cryptococcal meningitis
+    CSM501 เกิด Internal bleeding จากการทำ Liver biopsy
+    CSM502 เกิด Pneumothorax จากการทำ Bronchoscopy
+    CSM503 เกิด Brain herniation จากการทำ Lumbar puncture
+    CSM504 เกิด Gut perforation จากการทำ Gastroscopy/Colonoscopy
+    CSM601 เกิดภาวะ Sepsis/Malnutrition ใน Steven Johnson Syndrome
+    CSM602 เกิดภาวะ Septic shock ในโรค Acute pyelonephritis
+    CSM603 เกิดภาวะ Septic shock/Cardiac arrest ใน Sepsis
+    CSM604 เกิดภาวะ Severe acidosis ใน Lactic acidosis
+    CSM605 เกิดภาวะ Shock/Arrhythmia จากการทำ Hemodialysis
+
+    CSM606 เกิดภาวะแทรกซ้อนฉุกเฉินในโรค DM (เช่น Hypoglycemia/DKA)
+    CSM607 เกิดภาวะแทรกซ้อนฉุกเฉินในโรค Dengue fever (เช่น Shock/Bleeding)
+    CSM608 เกิดภาวะแทรกซ้อนฉุกเฉินในโรค ESRD (เช่น Fluid overload/Hyperkalemia)
+    CSM609 เกิดภาวะแทรกซ้อนฉุกเฉินในโรค HT (เช่น CVA/Encephalopathy)
+    CPM101 แพ้ยาซ้ำ
+    CPM102 ไม่มี/ไม่ปฏิบัติตาม Guideline ของการใช้ High Alert Drug
+    CPM103 ผู้ป่วยมีภาวะแทรกซ้อนที่ป้องกันได้จากการได้รับยาความเสี่ยงสูง
+    CPM104 Mis selection of a strong potassium containing solution***
+    CPM105 แพ้ยา (ยกเว้น แพ้ยาซ้ำ)/ADE: Adverse Drug Events ที่มีความรุนแรงระดับ E ขึ้นไป
+    CPM106 ไม่มี/ไม่ปฏิบัติตาม Guideline ของการใช้ Fatal Drug
+    CPM107 ผู้ป่วยได้รับยาที่มีคู่ยาปฏิกิริยารุนแรง
+    CPM201 Medication error : Prescribing (เกิดข้อผิดพลาด/อุบัติการณ์ในขั้นตอนการสั่งใช้ยา)
+    CPM202 Medication error : Transcribing (เกิดข้อผิดพลาด/อุบัติการณ์ในขั้นตอนการคัดลอกยา)
+    CPM203 Medication error : Pre-dispensing (เกิดข้อผิดพลาด/อุบัติการณ์ในขั้นตอนการจัดเตรียมจ่ายยา)
+    CPM204 Medication error : Dispensing (เกิดข้อผิดพลาด/อุบัติการณ์ในขั้นตอนการจ่ายยา)
+    CPM205 Medication error : Administration (เกิดข้อผิดพลาด/อุบัติการณ์ในขั้นตอนการให้ยา)
+    CPM206 ไม่มี/ไม่ปฏิบัติตาม Guideline เกี่ยวกับ Look-Alike Sound-Alike Medication Names
+    CPM207 ผู้ป่วยได้รับยา ในกลุ่ม Look-Alike Sound-Alike Medication Names
+    CPM208 ไม่มี/ไม่ปฏิบัติตามมาตรฐาน หรือ Guideline ของการใช้ยา ยกเว้น HAD, Fatal drug, Look-Alike Sound-Alike, Antibiotics
+    CPM301 ไม่มี/ไม่ปฏิบัติตาม Guideline เกี่ยวกับ Medication Reconciliation
+    CPM302 ผู้ป่วยไม่ได้รับยาเดิมต่อเนื่องจากไม่ได้ทำ Medication Reconciliation
+    CPM303 ผู้ป่วยได้รับยาซ้ำซ้อนจากไม่ได้ทำ Medication Reconciliation
+    CPM304 ผู้ป่วยได้รับยาที่มีปฏิกิริยากันโดยไม่ได้ทำ Medication Reconciliation
+    CPM401 ไม่มี/ไม่ปฏิบัติตาม Guideline เกี่ยวกับ Rational Drug Use
+    CPM402 การใช้ยาปฏิชีวนะในโรคติดเชื้อที่ระบบการหายใจช่วงบนและหลอดลมอักเสบเฉียบพลันในผู้ป่วยนอก
+    CPM403 การใช้ยาปฏิชีวนะในโรคอุจจาระร่วงเฉียบพลัน
+    CPM404 การใช้ยาอย่างไม่สมเหตุผล (ยกเว้นยาปฏิชีวนะ)
+    CPM501 การให้เลือดผิด (Incorrect blood component transfused, IBCT หรือ Wrong blood transfused)
+    CPM502 การมีปฏิกิริยาจากการได้รับเลือด (Transfusion reaction)**
+    CPM503 การไม่ปฏิบัติตามข้อกำหนด (Specific requirements not met, SRNM) ซึ่งเป็นเหตุให้ผู้ป่วยได้รับส่วนประกอบของเลือดที่ไม่เป็นไปตามที่กำหนด
+    CPM504 การให้เลือดที่ไม่เหมาะสม (Inappropriate transfusion)
+    CPM505 เกิดความผิดพลาดในการนำส่งและจัดเก็บส่วนประกอบของเลือด (Handling and storage errors, HSE)
+    CPM506 กระบวนการปฏิบัติงาน/ขั้นตอนการดำเนินงานในการให้เลือดผู้ป่วยคลาดเคลื่อนจากข้อกำหนด (Right blood right patient, RBRP)   
+    GPM101 เจ้าหน้าที่ทะเลาะกันในขณะปฏิบัติงาน
+    GPM102 เจ้าหน้าที่ถูกคุกคามทางจิตใจ
+    GPM103 เจ้าหน้าที่มีภาวะเป็น second victim 
+    GPM104 เจ้าหน้าที่มีภาวะเครียดจากการทำงาน
+    GPM203 เกิดเรื่องร้องเรียนจากการบริการทางการแพทย์
+    GPM204 เกิดเรื่องร้องเรียนทั่วไป ซึ่งไม่เกี่ยวกับการบริการทางการแพทย์  
+    GPM205 เกิดเรื่องฟ้องร้องทางคดีผู้บริโภค
+    GPM206 เกิดเรื่องฟ้องร้องทางคดีแพ่ง
+    GPM207 เกิดเรื่องฟ้องร้องทางคดีอาญา
+    GPM208 เกิดเรื่องฟ้องร้องทางคดีปกครอง
+    CSO101 กระดูกหักใกล้ข้อ/หลังเข้าเฝือก 24 ชั่วโมง แล้วเกิด Compartment syndrome
+    CSO102 ดึงถ่วงน้ำหนักผ่านกระดูก แล้วเกิดการเปลี่ยนแปลงระบบไหลเวียนเลือดส่วนปลาย และระบบประสาท
+    CSO103 เกิดภาวะแทรกซ้อนในโรค Long bone fracture เช่น Chest injury/Abdominal injury/C-spine injury/Fat embolism
+    CSO104 เกิดภาวะแทรกซ้อนใน Total knee replacement เช่น Active blood loss/spinal shock
+    CSO105 เกิดภาวะแทรกซ้อนใน Hip replacement เช่น Dislocation/Sciatic nerve injury/Hematoma/Fracture 
+    CSO106 เกิดภาวะแทรกซ้อนใน Laminectomy/Discectomy เช่น Cauda equina syndrome/Nerve root injury 
+    CPP101 Patient Identification
+    CPP201 การรายงานอาการ หรือสื่อสารข้อมูลเกี่ยวกับผู้ป่วยไม่เหมาะสม/ไม่ครบถ้วน
+    CPP202 การสื่อสารเพื่อการส่งตรวจหรือการรักษาทางรังสีวิทยาผิดพลาด/ไม่ครบถ้วน
+    CPP203 การสื่อสารเพื่อการส่งตรวจทางห้องปฏิบัติการผิดพลาด/ไม่ครบถ้วน
+    CPP204 การสื่อสารหรือส่งต่อข้อมูลการรักษาพยาบาลผู้ป่วยผิดพลาด เช่น ไม่สื่อสาร/สื่อสารผิด/สื่อสารไม่ครบถ้วน/สื่อสารล่าช้า
+    CPP205 ไม่รายงาน Critical Test Results หรือรายงานล่าช้า
+    CPP206 เกิดความผิดพลาดในการรักษาพยาบาลซึ่งมีสาเหตุมาจาก Verbal or Telephone Order/Communication
+    CPP207 เกิดความผิดพลาดจากการใช้สื่อในกระบวนการรักษาพยาบาล เช่น ใช้คำย่อ/ชื่อย่อ/สัญลักษณ์ที่ไม่เป็นสากล
+    CPP301 Misdiagnosis or delay diagnosis
+    CPP302 (Access & Entry) ผู้ป่วยเข้าถึงหรือได้รับบริการ ผิด/ล่าช้าไปจากเกณฑ์ หรือโรคที่เป็น
+    CPP303 (Patient Assessment) ผู้ป่วยไม่ได้รับการประเมิน/ประเมินผิด/ประเมินไม่ครบถ้วน ตามเกณฑ์ อาการหรือการดำเนินโรค
+    CPP304 (Planning of Care) ผู้ป่วยไม่ได้รับการวางแผนดูแล/วางแผนไม่ครอบคลุม หรือวางแผนผิดไปจากพยาธิสภาพ/สภาวะของโรค
+    CPP305 (Discharge Planning) ผู้ป่วยกลุ่มโรคจำเป็นไม่ได้รับการวางแผนจำหน่าย/วางแผนไม่ครอบคลุม ตามเกณฑ์ หรือประเด็น
+    CPP306 (Patient Care Delivery) ผู้ป่วยได้รับการดูแลไม่ครอบคลุม/ไม่เชื่อมโยง/ไม่สอดคล้อง ตามเกณฑ์ อาการ หรือโรค
+    CPP307 (Patient Care Delivery) ผู้ป่วยได้รับการทำหัตถการที่มีความเสี่ยงในสถานการณ์ หรือสถานที่ไม่เหมาะสม
+    CPP308 (Patient Care Delivery) ผู้ป่วยได้รับอาหารไม่เหมาะสมตามความต้องการพื้นฐาน หรือข้อบ่งชี้ของโรค/การเจ็บป่วย
+    CPP309 (Information and Empowerment) ผู้ป่วย/ครอบครัวไม่ได้รับข้อมูลเพื่อเสริมพลัง หรือได้รับไม่ชัดเจน/ไม่ต่อเนื่อง/ไม่เหมาะสม กับการรับรู้หรือมีส่วนร่วม
+    CPP310 (Information and Empowerment) ข้อมูลการวินิจฉัย/การดูแลรักษาของผู้ป่วยไม่ได้รับการบันทึกหรือได้รับการบันทึกไม่ครบถ้วน ไม่ชัดเจน ไม่เชื่อมโยงต่อเนื่อง
+    CPP311 (Continuity of Care) ผู้ป่วยได้รับการดูแลไม่ต่อเนื่อง/ไม่เชื่อมโยง/ไม่สอดคล้อง กับบริบทและสภาวะของโรค
+    CPP401 ผู้ป่วยเกิดภาวะแทรกซ้อนจากกระบวนการดูแลรักษาพยาบาลซึ่งป้องกันได้ (ยกเว้น เกิดแผลกดทับ, ตกเตียง/fall)
+    CPP402 ผู้ป่วยพยายามฆ่าตัวตาย/ฆ่าตัวตาย
+    CPP403 ผู้ป่วยถูกลักพาตัว สลับ หรือสูญหาย หรือพลัดหลง หรือหลบหนี
+    CPP404 เกิดแผลกดทับ
+    CPP405 ตกเตียง/fall
+    CPP406 ผู้ป่วยอาละวาดก้าวร้าว
+    CPP407 เกิดภาวะแทรกซ้อนจากการให้ยา/สารน้ำ/เลือด/ส่วนประกอบของเลือดทางหลอดเลือดดำส่วนปลาย (Infusion related complication)
+    CPP501 ผู้ป่วยไม่ได้รับ หรือได้รับการบรรเทาอาการปวดไม่เหมาะสมกับสภาพอาการ
+    CPP502 ผู้ป่วยมีภาวะแทรกซ้อนหรือเหตุการณ์ไม่พึงประสงค์จากการจัดการความปวด
+    CPP503 ผู้ป่วย Acute Pain ไม่ได้รับ หรือได้รับการบรรเทาอาการปวดไม่เหมาะสม
+    CPP504 Chronic Non-Cancer Patients ได้รับการสั่งใช้ Opioids ไม่เหมาะสม
+    CPP505 ผู้ป่วยมีภาวะแทรกซ้อนหรือเหตุการณ์ไม่พึงประสงค์จากการใช้ opioids ในการระงับปวดเรื้อรังที่มิใช่มะเร็ง
+    CPP506 Management for Cancer Pain and Palliative Care ไม่เหมาะสม
+    CPP601 ผู้ป่วยที่จำเป็นต้องส่งต่อเพื่อการรักษา ไม่ได้รับการส่งต่อหรือส่งต่อได้ในช่วงเวลาไม่เหมาะสม
+    CPP602 มีภาวะแทรกซ้อนหรือเหตุการณ์ไม่พึงประสงค์ที่ป้องกันได้ระหว่างส่งต่อ
+    CSP101 เกิด Apnea/RDS/BPD/ROP/NEC/Anemia ใน Preterm ที่ VLBW
+    CSP102 เกิด Hypo-Hyperglycemia ใน Preterm ที่ VLBW
+    CSP103 เกิด Hypo-Hyperthermia ใน Preterm ที่ VLBW
+    CSP104 เกิด Hypo-Hyperglycemia/Polycythemia ใน Macrosomia/LGA/GDM
+    CSP105 เกิด PPHN/Pneumothorax ใน MAS
+    CSP201 เกิด Acidosis/Electrolyte Imbalance ในโรค Acute Diarrhea
+    CSP202 เกิด Sepsis/Emphysema/IRDS/Hypoxia ในโรค Pneumonia
+    CSP203 เกิด Shock/Bleeding/Pleural effusion ในโรค DHF
+    GOP101 เกิดปัญหาด้านการควบคุมภารกิจ เช่น ไม่กำหนดวัตถุประสงค์-เป้าหมายการดำเนินงาน/ภารกิจไม่ชัดเจนเป็นลายลักษณ์อักษร/ขาดการประกาศสื่อสารภารกิจ
+    GOP201 เกิดปัญหาด้านกระบวนการบริการ เช่น ไม่มีการกำหนดมาตรฐานขั้นตอนกระบวนการบริการ, ให้บริการไม่ครอบคลุม/ไม่พร้อม/ไม่ตรงตามช่วงระยะเวลา
+    GPP101 บุคลากรปฏิบัติงานโดยมีภาระงานที่มากเกินเกณฑ์มาตรฐาน (work load)
+    GPP102 บุคลากรที่มีภาวะเสี่ยงต่อการติดเชื้อ หรือรับการแพร่กระจายเชื้อ ไม่ได้รับการป้องกันหรือดูแลที่เหมาะสม 
+    GPP103 บุคลากรประสบอุบัติเหตุหรือบาดเจ็บจากการปฏิบัติงาน (ยกเว้น ถูกวัสดุอุปกรณ์มีคมทิ่มตำ)
+    GPP201 องค์กรเกิดภาวะที่คุกคามบุคลากรด้านกายภาพ ได้แก่ เสียงดัง (noise) แสงสว่าง (light) ความร้อน (heat)
+    GPP202 บุคลากรไม่ได้รับ/ ไม่ได้ใช้อุปกรณ์ หรือใช้ไม่ถูกต้องในการป้องกันและคุ้มครองความปลอดภัยทางกายภาพ
+    GPP203 บุคลากรเกิดโรคจากการทำงาน ซึ่งมีสาเหตุจาก Physical Hazard
+    GPP204 องค์กรมีภาวะความไม่ปลอดภัยจากสารเคมีและวัตถุอันตราย
+    GPP205 บุคลากรไม่ได้รับ/ไม่ได้ใช้อุปกรณ์ หรือใช้ไม่ถูกต้องในการป้องกันและคุ้มครองความปลอดภัยทางเคมี
+    GPP206 บุคลากรเกิดโรคจากการทำงาน ซึ่งมีสาเหตุจาก Chemical Hazard
+    GPP207 องค์กรเกิดความไม่ปลอดภัยจากรังสีในที่ทำงาน เช่น เกิดการรั่วไหลของรังสี
+    GPP208 บุคลากรไม่ได้รับ/ไม่ได้ใช้อุปกรณ์ หรือใช้ไม่ถูกต้องในการป้องกันและคุ้มครองความปลอดภัยทางรังสี
+    GPP209 บุคลากรเกิดโรคจากการทำงาน ซึ่งมีสาเหตุจาก Radiation Hazard
+    GPP210 บุคคลากรมีการทำงานในท่าทางหรือลักษณะอันอาจมีผลกระทบต่อสุขภาพด้านโครงร่างของกระดูกและกล้ามเนื้อ
+    GPP211 บุคลากรไม่ได้รับคำแนะนำ/อุปกรณ์ในการปรับ การทำงานเพื่อลดผลกระทบต่อสุขภาพด้านโครงร่างของกระดูกและกล้ามเนื้อ
+    GPP212 บุคลากรเกิดโรคจากการทำงานเกี่ยวกับโครงร่างกระดูกและกล้ามเนื้อ ซึ่งมีสาเหตุจาก Biomechanical Hazard 
+    GPP301 บุคลากรไม่ได้ตรวจสุขภาพก่อนการรับเข้าทำงาน
+    GPP302 บุคลากรได้รับการตรวจสุขภาพประจำปี ซึ่งมีโปรแกรมการตรวจไม่ครบถ้วน เหมาะสม ตรงตามลักษณะงาน
+    GPP303 บุคลากรที่มีโอกาสแพร่กระจายเชื้อต่างๆ มาทำงานโดยไม่ป้องกันและควบคุม
+    CPS101 ผ่าตัดผิดตำแหน่ง ผิดข้าง (Surgery or other invasive procedure performed on the wrong body part)*
+    CPS102 ผ่าตัดผิดคน (Surgery or other invasive procedure performed on the wrong patient)*
+    CPS103 ผ่าตัดผิดชนิด (Wrong surgical or other invasive procedure performed on a patient)*
+    CPS104 Wrong implant/prosthetic***
+    CPS105 บาดเจ็บอวัยวะข้างเคียงระหว่างผ่าตัด (Internal organ injury or Accidental puncture or laceration)**
+    CPS106 Perioperative hemorrhage or hematoma**
+    CPS107 ภาวะแทรกซ้อนอื่นๆ ของผู้ป่วยระหว่างการผ่าตัดที่ป้องกันได้
+    CPS108 ผ่าตัดซ้ำโดยไม่ได้วางแผน
+    CPS109 ความคาดเคลื่อนของการส่งผลชิ้นเนื้อ หรือสิ่งส่งตรวจอื่นในกระบวนการผ่าตัด
+    CPS110 Intraoperative or immediately postoperative/post procedure death in an ASA PS I patient*
+    CPS111 SSI: Surgical Site Infection
+    CPS112 Postoperative Acute Kidney Injury Requiring Dialysis**
+    CPS113 Postoperative Hip Fracture**
+    CPS114 Postoperative Respiratory failure**
+    CPS115 Postoperative Sepsis**   
+    CPS116 Postoperative Wound dehiscence**
+    CPS117 ภาวะแทรกซ้อนอื่นๆ ของผู้ป่วยหลังผ่าตัดที่ป้องกันได้
+    CPS118 เกิดภาวะ Venous Thromboembolism (VTE) หลังผ่าตัด
+    CPS201 เกิดภาวะแทรกซ้อนที่เกี่ยวข้องกับการระงับความรู้สึก
+    CPS202 ภาวะหัวใจหยุดเต้นระหว่างผ่าตัดในผู้ป่วย ASA PS I, II
+    CPS203 ใส่ท่อหายใจซ้ำภายใน 2 ชั่วโมงหลังการถอดท่อหายใจ (re-intubation within 2 hrs. after ex-tubation)
+    CPS301 สิ่งแวดล้อมในห้องผ่าตัดไม่ปลอดภัย
+    CPS302 ไฟฟ้าสำรองไม่ทำงานภายในระยะเวลาที่กำหนดเมื่อไฟดับระหว่างผ่าตัด
+    CPS303 เครื่องมือ-อุปกรณ์สำหรับผ่าตัดไม่พร้อมใช้งาน
+    CPS304 ภาวะแทรกซ้อนจากเครื่องมือ/อุปกรณ์เกี่ยวกับการผ่าตัด
+    CPS305 เหตุการณ์ไม่พึงประสงค์ จากการไม่ปฏิบัติตามขั้นตอนกระบวนการดูแลผู้ป่วยที่มารับการผ่าตัด
+    CPS306 การเลื่อนการผ่าตัดที่ไม่เร่งด่วนจากความไม่พร้อมหรือการประเมินไม่ครบถ้วน
+    CPS307 การมีอุปกรณ์หรือสิ่งตกค้างอื่นใดในร่างกายผู้ป่วย (Unintended retention of foreign object in a patient after surgery or other procedure)***
+    CPS308 การปฏิบัติโดยไม่คำนึงถึงศักดิ์ศรีความเป็นมนุษย์และสิทธิผู้ป่วย
+    GPS101 เกิดอุบัติการณ์ด้านความมั่นคงปลอดภัยไซเบอร์ที่ทำให้ข้อมูลความลับของสถานพยาบาลรั่วไหล (Confidentiality Failure)
+    GPS102 เกิดอุบัติการณ์ด้านความมั่นคงปลอดภัยไซเบอร์ที่ทำให้ข้อมูลสารสนเทศของสถานพยาบาลถูกแก้ไข/ลบ/เพิ่มเติม/ทำให้เสียหายหรือสูญหายโดยมิชอบ (Integrity Failure)
+    GPS103 เกิดอุบัติการณ์ด้านความมั่นคงปลอดภัยไซเบอร์ที่ทำให้ระบบสารสนเทศของสถานพยาบาลขัดข้อง/ใช้การไม่ได้/ทำงานช้าหรือไม่ปกติ (Availability Failure)
+    GPS104 เกิดอุบัติการณ์ด้านความมั่นคงปลอดภัยไซเบอร์ที่ทำให้เกิดความเสียหายต่อข้อมูลหรือระบบสารสนเทศของสถานพยาบาลมากกว่าหนึ่งด้าน (Multiple Failures) ระหว่าง Confidentiality Failure, Integrity Failure และ Availability Failure
+    GPS105 เกิดอุบัติการณ์การละเมิดความเป็นส่วนตัว (Privacy) ของข้อมูลส่วนบุคคลของบุคลากรหรือนักศึกษาของสถานพยาบาล ที่ไม่ใช่อุบัติการณ์ด้านความมั่นคงปลอดภัยไซเบอร์
+    GPS106 เกิดอุบัติการณ์ความละเมิดความเป็นส่วนตัว (Privacy) ของข้อมูลส่วนบุคคลของผู้ป่วย/ผู้รับบริการ หรือบุคคลภายนอก ที่ไม่ใช่อุบัติการณ์ด้านความมั่นคงปลอดภัยไซเบอร์
+    GPS201 บุคลากรถูกกล่าวถึงหรือวิพากษ์วิจารณ์ในทางลบบนสื่อสังคมออนไลน์หรือสื่อสาธารณะที่เกี่ยวข้องกับการปฏิบัติหน้าที่
+    GPS202 บุคลากรถูกกล่าวถึงหรือวิพากษ์วิจารณ์ในทางลบบนสื่อสังคมออนไลน์หรือสื่อสาธารณะที่ไม่ได้เกี่ยวข้องกับการปฏิบัติหน้าที่
+    GPS203 บุคลากรใช้สื่อสังคมออนไลน์ไม่เหมาะสม เกิดผลกระทบทางลบต่อตนเอง บุคลากรคนอื่น สถานพยาบาล ผู้ป่วย/ผู้รับบริการ หรือบุคคลภายนอก
+    GPS204 เกิดอุบัติการณ์ที่ส่งผลกระทบทางลบต่อสถานพยาบาลบนสื่อสังคมออนไลน์ เช่น Drama, Fake News แต่ไม่ได้เกิดจากบุคลากร และไม่กระทบบุคลากรคนใดคนหนึ่งโดยตรง
+    GOS101 เกิดปัญหาด้านการควบคุมการวางแผน เช่น ไม่มีแผนปฏิบัติการ-แผนไม่ครอบคลุม/การสื่อสารแผน/การมอบหมายผู้รับผิดชอบ/ไม่กำหนดวัตถุประสงค์
+    GOS102 เกิดปัญหาด้านการควบคุมกระบวนการปฏิบัติงาน เช่น ไม่กำหนดกระบวนการปฏิบัติงานที่สำคัญ/ขาดการประเมินประสิทธิภาพ/ขาดการติดตามผล/ไม่มีการปรับปรุงแก้ไขข้อเสนอแนะ
+    GOS103 เกิดปัญหาด้านการติดตามประเมินผล เช่น ไม่มีการประเมินความคืบหน้า/ไม่เปรียบเทียบผลการใช้จ่ายเงิน/ไม่แจ้งผลการประเมินให้ทราบ/ไม่ได้ทบทวนวัตถุประสงค์-แผนและกระบวนการดำเนินงาน
+    GOS201 อาคารสถานที่/พื้นที่ให้บริการ ไม่เหมาะสม/ไม่ปลอดภัย/ไม่ถูกสุขลักษณะ
+    GOS202 ห้องน้ำหรือห้องสุขาไม่พร้อมใช้ (เช่น ชำรุด/กดชักโครกไม่ลง/ส้วมเต็ม/ไม่พอใช้) หรือไม่สะดวกต่อผู้พิการ
+    GOS301 อันตรายจากภัยธรรมชาติ อุทกภัย อัคคีภัย วาตภัย
+    CSS101 ทำ Perm-cath insertion แล้วเกิด Bleeding/Pneumothorax
+    CSS102 เกิด Bleeding with shock ในโรค Blunt abdominal injury
+    CSS103 เกิด Bowel gangrene ในโรค Hernia
+    CSS104 เกิด Gut obstruction ในโรค Carcinoma of colon
+    CSS105 เกิด Intracranial hemorrhage ในโรค Head injury
+    CSS106 เกิด Rupture ในโรค Acute appendicitis
+    CSS107 เกิด Sepsis ในโรค Acute cholecystitis
+    CSS108 เกิด Sepsis ในโรค Cellulitis
+    CSS201 เกิด Bleeding ใน PCNC (Percutaneous Nephrocystostomy catheter)
+    CSS202 เกิด Hydro-pneumothorax ใน PCNC (Percutaneous Nephrocystostomy catheter)
+    CSS203 เกิด Renal pelvis perforation ใน PCNC (Percutaneous Nephrocystostomy catheter)
 
     [ระดับความรุนแรง] ในกลุ่มความเสี่ยงด้านคลินิก=รหัส NRLS & HRMS ที่ขึ้นต้นด้วย C และ GP จะเป็นระดับ A-I
     A (เกิดที่นี่): เกิดเหตุการณ์ขึ้นแล้วจากตัวเองและค้นพบได้ด้วยตัวเองสามารถปรับแก้ไขได้ไม่ส่งผลกระทบถึงผู้อื่นและผู้ป่วยหรือบุคลากร
@@ -319,8 +427,599 @@ def get_consultation_response(incident_description: str) -> str:
     F0036 Environment: Physical surroundings (e.g., lighting, noise)    
 
     NOWLEDGE BASE (ฐานข้อมูลความรู้ 3P Safety):
-    (ดึงเฉพาะส่วนที่เกี่ยวข้อง (top-k) ต่อเคสจากไฟล์ knowledge_base.jsonl)
-    {retrieved_knowledge}
+
+    หมวดหมู่: Clinical Processes & Outcomes (กระบวนการทางคลินิกและผลลัพธ์)    
+    กลุ่ม: ทันตกรรม (CSD)    
+    รหัส: CSD101    
+    รายละเอียด: เกิดปัญหาใน Dental Tx ผู้ป่วยโรค DM เช่น Hypo-Hyperglycemia/แผลหายช้า/Advance Periodontitis    
+    ด้านความปลอดภัยที่เกี่ยวข้อง:    
+    [Patient Safety] S 3.3: Safe Surgical Care Process  
+    เหตุผล: การเกิดภาวะแทรกซ้อนในผู้ป่วยเบาหวานระหว่างทำหัตถการทางทันตกรรม ชี้ให้เห็นถึงความบกพร่องในการประเมินและเตรียมความพร้อมผู้ป่วยที่มีภาวะเสี่ยงก่อนทำหัตถการ
+    กระบวนการที่ควรทบทวน: ต้องประเมินภาวะสุขภาพด้านร่างกายของผู้ป่วยที่มีความเสี่ยงเพื่อแก้ไขและป้องกัน, ตรวจสอบความพร้อมของสภาพร่างกายทั่วไปที่อาจเสี่ยงต่อการเกิดเหตุการณ์ไม่พึงประสงค์
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 หัวข้อ 4.3  (Patient Care Delivery) การดูแลเฉพาะ ข. การผ่าตัด
+
+    รหัส CSD102: เกิดปัญหาใน Dental Tx in Hemorrhagic disorders เช่น Spontaneous or prolong bleeding/Delayed healing
+    [Patient Safety] S 3.3 Safe Surgical Care Process
+    เหตุผล: การเกิดภาวะเลือดออกผิดปกติระหว่างทำหัตถการทางทันตกรรม แสดงถึงการประเมินความเสี่ยงด้านร่างกายของผู้ป่วยก่อนทำหัตถการอาจไม่ครอบคลุม
+    กระบวนการที่ควรทบทวน: ก่อนทำหัตถการต้องประเมินภาวะสุขภาพด้านร่างกายผู้ป่วยที่มีความเสี่ยง (เช่น ภาวะเลือดออกง่าย) เพื่อแก้ไขและป้องกันความเสี่ยง
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 หัวข้อ 4.3  (Patient Care Delivery) การดูแลเฉพาะ ข. การผ่าตัด
+
+    รหัส CSD103: เกิด Airway obstruction ในโรค Ludwig's Angina
+
+    [Patient Safety] E 1 Response to the Deteriorating Patient
+
+    เหตุผล: ภาวะทางเดินหายใจอุดกั้นเป็นภาวะวิกฤตที่ผู้ป่วยมีอาการทรุดลงอย่างรวดเร็ว ทีมต้องสามารถประเมินและตอบสนองได้อย่างทันท่วงที    
+    กระบวนการที่ควรทบทวน: พัฒนาระบบ Rapid Response System, จัดตั้งทีม Rapid Response Team (RRT), และใช้เครื่องมือประเมินสัญญาณเตือน (Early Warning Score)    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4  (Patient Care Delivery) ข้อ 4.2  ข้อย่อย (5)
+
+    รหัส CSD104: เกิด Allergy to Local anesthesia ใน Dental Tx    
+    [Patient Safety] S 2 Safe Anesthesia    
+    เหตุผล: การแพ้ยาชาเฉพาะที่เป็นภาวะแทรกซ้อนโดยตรงจากการให้ยาระงับความรู้สึก ซึ่งต้องมีการประเมินและเตรียมความพร้อมก่อนให้ยา    
+    กระบวนการที่ควรทบทวน: ก่อนทำการระงับความรู้สึก ผู้ป่วยต้องได้รับการประเมินสภาวะ, ซักประวัติการแพ้ยา, และให้ความรู้เกี่ยวกับภาวะแทรกซ้อนที่อาจเกิดขึ้น    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 หัวข้อ 4.3 (Patient Care Delivery) การดูแลเฉพาะ ก. การระงับความรู้สึก
+
+    รหัส CSD105: เกิด Chest pain/Acute MI ใน Dental Tx ผู้ป่วยโรค Angina pectoris or MI    
+    [Patient Safety] S 3.3 Safe Surgical Care Process    
+    เหตุผล: การเกิดภาวะหัวใจขาดเลือดระหว่างทำหัตถการทางทันตกรรม สะท้อนถึงการประเมินและเตรียมความพร้อมผู้ป่วยที่มีโรคประจำตัวความเสี่ยงสูงไม่เพียงพอ    
+    กระบวนการที่ควรทบทวน: ก่อนทำหัตถการต้องประเมินภาวะสุขภาพด้านร่างกายผู้ป่วยที่มีความเสี่ยงสูง (เช่น โรคหัวใจ) เพื่อแก้ไขและป้องกันความเสี่ยงที่อาจเกิดขึ้น    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 หัวข้อ 4.3  (Patient Care Delivery) การดูแลเฉพาะ ข. การผ่าตัด    
+    รหัส CSD106: เกิด Subacute bacterial endocarditis ใน Dental Tx ผู้ป่วยโรคลิ้นหัวใจหรือใส่ลิ้นหัวใจเทียม    
+    [Patient Safety] S 1.2 Surgical Site Infection (SSI) Prevention    
+    เหตุผล: การเกิดเยื่อบุหัวใจอักเสบหลังทำฟันในผู้ป่วยกลุ่มเสี่ยง เกี่ยวข้องโดยตรงกับการป้องกันการติดเชื้อ ซึ่งรวมถึงการพิจารณาให้ยาปฏิชีวนะเพื่อป้องกันตามแนวทาง    
+    กระบวนการที่ควรทบทวน: กำหนดแนวทางการให้ยาปฏิชีวนะเพื่อป้องกันการติดเชื้อตามหลักฐานเชิงประจักษ์ในผู้ป่วยกลุ่มเสี่ยงสูงก่อนทำหัตถการ    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 4 ข้อ 4.1 (IC.1) และตอนที่ III หมวดที่ 4  (Patient Care Delivery) ข้อ 4.3 
+
+    รหัส CSD107: เกิด Tumor that extends to malignancy ในโรค Oral lesion แผลในช่องปาก    
+    [Patient Safety] P 3 Reduction of Diagnostic Errors    
+    เหตุผล: การที่แผลในช่องปากลุกลามเป็นมะเร็ง อาจเกิดจากการวินิจฉัยที่ล่าช้า (Delayed Diagnosis) ซึ่งเป็นความผิดพลาดในการวินิจฉัยประเภทหนึ่ง    
+    กระบวนการที่ควรทบทวน: วางระบบรายงานผลการตรวจชิ้นเนื้อให้ครบวงจร, ส่งเสริมการใช้ความเห็นที่สอง (second opinions) ในการวินิจฉัยโรค, จัดให้มีช่องทางรับข้อมูลสะท้อนกลับ (feedback) เกี่ยวกับการวินิจฉัย    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 2 การประเมินผู้ป่วย (ASM) ค.การวินิจโรค (4)
+
+    รหัส CSD108: เกิดภาวะฉุกเฉินใน Emergency in dental clinic เช่น Syncope/Hyperventilation/Toxic effect of local anesthesia    
+    [Patient Safety] E 1 Response to the Deteriorating Patient    
+    เหตุผล: ภาวะฉุกเฉินในคลินิกทันตกรรมคือภาวะที่ผู้ป่วยมีอาการทรุดลง ซึ่งต้องมีระบบและทีมที่พร้อมตอบสนองอย่างรวดเร็วและมีประสิทธิภาพ    
+    กระบวนการที่ควรทบทวน: ต้องมีทีมและอุปกรณ์ที่พร้อมตอบสนองต่อภาวะฉุกเฉิน, บุคลากรต้องได้รับการฝึกอบรมการดูแลผู้ป่วยที่มีภาวะทรุดลง    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 ข้อ 4.2  (Patient Care Delivery) ข้อย่อย (5)
+
+    รหัส CSD109: เกิดภาวะแทรกซ้อนในผู้ป่วย Head and neck cancer therapy เช่น Osteoradionecrosis/Halitosis/Mucositis    
+    [Patient Safety] P 5.4 Management of Cancer Pain and Palliative Care    
+    เหตุผล: ภาวะแทรกซ้อนเหล่านี้เป็นส่วนหนึ่งของการดูแลผู้ป่วยมะเร็งแบบประคับประคอง ซึ่งต้องมีการประเมินและจัดการอาการไม่สุขสบายต่างๆ อย่างครอบคลุม    
+    กระบวนการที่ควรทบทวน: ผู้ป่วยมะเร็งที่มีอาการอื่นๆ เกิดร่วม ควรได้รับการประเมินและจัดการอย่างครอบคลุมทั้งด้านกาย จิตใจ และสังคม, ควรมีการสื่อสารกับผู้ป่วยเพื่อวางแผนการดูแลล่วงหน้า    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 ข้อ 4.3 การดูแลเฉพาะ จ.การจัดการความปวด (1), (2) และ (3)
+
+    รหัส CSD110: เกิดภาวะแทรกซ้อนใน Oral surgery/Simple-Surgical extraction เช่น Bleeding/Pain and Swelling/Fibrinolytic alveolitis    
+    [Patient Safety] S 3.3 Safe Surgical Care Process    
+    เหตุผล: ภาวะแทรกซ้อนหลังการผ่าตัดช่องปาก เช่น เลือดออก หรือปวดบวม เป็นสิ่งที่ป้องกันและบรรเทาได้ด้วยกระบวนการดูแลหลังผ่าตัดที่ดี    
+    กระบวนการที่ควรทบทวน: มีการดูแลหลังผ่าตัดเพื่อป้องกันอันตรายจากภาวะแทรกซ้อน โดยใช้หลัก Early Warning Signs, มีการบันทึกข้อมูลที่สำคัญและส่งต่อข้อมูลให้ทีมผู้ดูแลอย่างครบถ้วน    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 หัวข้อ 4.3  (Patient Care Delivery) การดูแลเฉพาะ  ข. การผ่าตัด
+
+    รหัส CSD111: แผลถอนฟันหายช้าและติดเชื้อ ในผู้ป่วย HIV/Immunosuppressive/On steroid    
+    [Patient Safety] S 1.2 Surgical Site Infection (SSI) Prevention    
+    เหตุผล: การติดเชื้อในผู้ป่วยที่มีภาวะภูมิคุ้มกันบกพร่องเป็นความเสี่ยงสูงที่ต้องมีกระบวนการป้องกันการติดเชื้อที่รัดกุมเป็นพิเศษ    
+    กระบวนการที่ควรทบทวน: ประเมินการปฏิบัติของบุคลากรตามแนวปฏิบัติ, กำหนดแนวปฏิบัติในการทำให้เครื่องมือผ่าตัดปราศจากเชื้อ และประเมินประสิทธิภาพ, กำหนดนโยบายและจัดทำแนวปฏิบัติในการป้องกันการติดเชื้อ    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 4 ข้อ 4.1 (IC.1) และตอนที่ III หมวดที่ 4 ข้อ 4.3 (Patient Care Delivery)
+
+    กลุ่ม: จักษุ (CSE)
+
+    รหัส CSE101 - CSE108: เกิดภาวะแทรกซ้อนจากการผ่าตัดตา เช่น Iris prolapsed, Rupture posterior capsule, กระจกตาบวม, Endophthalmitis    
+    [Patient Safety] S 1.1 (Surgical Safety Checklist), S 1.2 (SSI Prevention), S 3.3 (Safe Surgical Care Process)    
+    เหตุผล: ภาวะแทรกซ้อนเหล่านี้เกี่ยวข้องโดยตรงกับความปลอดภัยในทุกขั้นตอนของกระบวนการผ่าตัด ตั้งแต่การประเมินผู้ป่วย การป้องกันการติดเชื้อ ไปจนถึงเทคนิคการผ่าตัดและการดูแลหลังผ่าตัด    
+    กระบวนการที่ควรทบทวน: ทบทวนการใช้ Surgical Safety Checklist อย่างเคร่งครัด, ทบทวนมาตรการป้องกันการติดเชื้อในห้องผ่าตัด, ทบทวนเทคนิคการผ่าตัดและการจัดการภาวะแทรกซ้อนระหว่างผ่าตัด, และทบทวนการดูแลหลังผ่าตัดเพื่อเฝ้าระวังการติดเชื้อ    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 หัวข้อ 4.3  (Patient Care Delivery) การดูแลเฉพาะ ข. การผ่าตัด, ตอนที่ II หมวดที่ 4 การป้องกันและควบคุมการติดเชื้อ (IC)
+
+    กลุ่ม: สูติ-นรีเวชกรรม (CSG)
+
+    รหัส CSG101 - CSG306: เกิดปัญหาและภาวะแทรกซ้อนทางสูติ-นรีเวชกรรม เช่น Uterine rupture, Preeclampsia, PPH, Fetal loss, Ectopic pregnancy rupture    
+    [Patient Safety] E 3.1 (PPH), E 3.2 (Safe Labour), E 3.3 (Birth Asphyxia)    
+    เหตุผล: อุบัติการณ์เหล่านี้เป็นภาวะฉุกเฉินทางสูติกรรมที่คุกคามชีวิตมารดาและทารก ซึ่งเป้าหมาย SIMPLE ได้กำหนดแนวทางป้องกันและจัดการไว้อย่างชัดเจน    
+    กระบวนการที่ควรทบทวน: ทบทวนระบบการคัดกรองความเสี่ยงของหญิงตั้งครรภ์, การดูแลระหว่างคลอดตามมาตรฐาน, ความพร้อมของทีมและอุปกรณ์ในการรับมือภาวะฉุกเฉิน (เช่น การตกเลือด, การกู้ชีพทารก), และประสิทธิภาพของระบบการส่งต่อ    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 ข้อ 4.2  (Patient Care Delivery) การดูแลผู้ป่วยและการให้บริการที่มีความเสี่ยงสูง 
+
+    กลุ่ม: ศัลยกรรมกระดูก (CSO)
+
+    รหัส CSO101 - CSO106: เกิดภาวะแทรกซ้อนจากการรักษาทางออร์โธปิดิกส์ เช่น Compartment syndrome, Nerve injury, Dislocation    
+    [Patient Safety] S 1.3 (ERAS), S 3.3 (Safe Surgical Care Process), P 5.1 (Pain Management)    
+    เหตุผล: ภาวะแทรกซ้อนเหล่านี้เกี่ยวข้องโดยตรงกับกระบวนการผ่าตัด การดูแลหลังผ่าตัด และการจัดการความปวด ซึ่งต้องมีการเฝ้าระวังและป้องกันอย่างเป็นระบบ    
+    กระบวนการที่ควรทบทวน: ทบทวนการประเมินและเฝ้าระวังภาวะแทรกซ้อนหลังผ่าตัด (เช่น การประเมินระบบไหลเวียนเลือดและระบบประสาท), การจัดท่าผู้ป่วย, การทำกายภาพบำบัดเพื่อฟื้นฟู และการจัดการความปวดอย่างเหมาะสม    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 หัวข้อ 4.3  (Patient Care Delivery) การดูแลเฉพาะ ข. การผ่าตัด และ จ. การจัดการความปวด
+
+    กลุ่ม: ศัลยกรรมทั่วไป (CSS)
+
+    รหัส CSS101 - CSS203: เกิดภาวะแทรกซ้อนจากการทำหัตถการหรือการเจ็บป่วยทางศัลยกรรม เช่น Bleeding, Sepsis, Gut obstruction, Pneumothorax    
+    [Patient Safety] S 1.1 (Surgical Safety Checklist), S 1.2 (SSI Prevention), S 3.3 (Safe Surgical Care Process), E 1 (Response to the Deteriorating Patient)    
+    เหตุผล: อุบัติการณ์เหล่านี้ครอบคลุมตั้งแต่การป้องกันความผิดพลาดในการผ่าตัด การป้องกันการติดเชื้อ ไปจนถึงการตอบสนองต่อภาวะทรุดลงของผู้ป่วย
+
+    กระบวนการที่ควรทบทวน: ทบทวนการใช้ Checklist, มาตรการป้องกันการติดเชื้อ, การประเมินและเฝ้าระวังผู้ป่วยหลังผ่าตัด และความพร้อมของทีมในการตอบสนองต่อภาวะฉุกเฉิน    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 หัวข้อ 4.3  (Patient Care Delivery) ข. การผ่าตัด, ตอนที่ II หมวดที่ 4 (IC), ตอนที่ III หมวดที่ 4 ข้อ 4.2 (Patient Care Delivery)
+
+    กลุ่ม: อายุรกรรม (CSM)
+
+    รหัส CSM101 - CSM609: เกิดภาวะแทรกซ้อนรุนแรงจากโรคทางอายุรกรรม เช่น Respiratory failure, Cardiogenic shock, Hypovolemic Shock, Brain herniation, Sepsis, DKA    
+    [Patient Safety] E 1 (Response to the Deteriorating Patient), E 2.1 (Sepsis), E 2.2 (ACS), E 2.3 (Stroke)    
+    เหตุผล: ภาวะวิกฤตทางอายุรกรรมเหล่านี้คือภาวะที่ผู้ป่วยมีอาการทรุดลง ซึ่งต้องมีระบบการเฝ้าระวังและตอบสนองที่รวดเร็วเพื่อป้องกันผลลัพธ์ที่รุนแรง    
+    กระบวนการที่ควรทบทวน: ทบทวนการใช้ Early Warning Score เพื่อตรวจจับภาวะทรุดลง, การมีทีม RRT, และการปฏิบัติตามแนวทางการดูแลภาวะฉุกเฉินเฉพาะโรค (Sepsis bundles, Stroke fast track, ACS pathway)
+
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 ข้อ 4.2  (Patient Care Delivery) การดูแลผู้ป่วยและการให้บริการที่มีความเสี่ยงสูง 
+
+    กลุ่ม: กุมารเวชกรรม (CSP)    
+    รหัส CSP101 - CSP203: เกิดภาวะแทรกซ้อนในทารกแรกเกิดและเด็ก เช่น Apnea, RDS, Hypoglycemia, Sepsis, Shock    
+    [Patient Safety] E 3.3 (Birth Asphyxia), E 1 (Response to the Deteriorating Patient)    
+    เหตุผล: ภาวะวิกฤตในเด็กและทารกแรกเกิดต้องการการตอบสนองที่รวดเร็วและแม่นยำ    
+    กระบวนการที่ควรทบทวน: ทบทวนระบบการดูแลทารกแรกเกิดที่มีภาวะเสี่ยง, การกู้ชีพทารก, การใช้เครื่องมือเฝ้าระวังอาการทรุดลงที่เหมาะสมกับเด็ก (Pediatric Early Warning Score) และความพร้อมของทีม RRT สำหรับผู้ป่วยเด็ก
+
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 ข้อ 4.2  (Patient Care Delivery) การดูแลผู้ป่วยและการให้บริการที่มีความเสี่ยงสูง  
+    หมวดหมู่: General Safety and Processes (ความปลอดภัยทั่วไปและกระบวนการ)    
+    กลุ่ม: การป้องกันและควบคุมการติดเชื้อ (CPI, GPI)
+
+    รหัส CPE201: Sepsis with death    
+    [Patient Safety] P 7: Early Recognition and Effective Response to Clinical Deterioration (การตระหนักรู้และตอบสนองต่อภาวะผู้ป่วยทรุดลงอย่างทันท่วงที)    
+    เหตุผล: Sepsis with death (การเสียชีวิตจากภาวะติดเชื้อในกระแสเลือด) ถือเป็น Sentinel Event (เหตุการณ์ไม่พึงประสงค์ร้ายแรง) ที่สะท้อนถึงความล้มเหลวในกระบวนการสำคัญ 2 ส่วน คือ:    
+    การตระหนักรู้ (Recognition): ความล้มเหลวในการประเมินและตรวจจับสัญญาณเตือน (Early Warning Signs) ของภาวะ Sepsis หรือภาวะที่ผู้ป่วยกำลังทรุดลง    
+    การตอบสนอง (Response): ความล้มเหลวในการให้การรักษาที่จำเป็นอย่างทันท่วงที (เช่น Sepsis Bundle - ให้ยาปฏิชีวนะ, สารน้ำ, และควบคุมแหล่งติดเชื้อภายในเวลาที่กำหนด) หรือความล้มเหลวของระบบตอบสนองฉุกเฉิน (Rapid Response System)
+    
+    กระบวนการที่ควรทบทวน: การใช้เครื่องมือคัดกรอง/เฝ้าระวัง Sepsis และ Early Warning Scores (EWS) ในการประเมินผู้ป่วยแรกรับและประเมินซ้ำ    
+    ระบบตอบสนองฉุกเฉิน (Rapid Response System - RRS) หรือ Sepsis Fast Track    
+    การปฏิบัติตามแนวทาง Sepsis Bundle (เช่น Surviving Sepsis Campaign) โดยเฉพาะ "Hour-1 Bundle"    
+    การทบทวนเวชระเบียนเพื่อหาสาเหตุของความล่าช้า (Delay in diagnosis / treatment)
+    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 4 ข้อ 4.2 ก.
+    และเกี่ยวข้องโดยตรงกับกระบวนการใน ตอนที่ III หมวดที่ 2 ข้อ 2.2 (การประเมินซ้ำ) (เรื่องการใช้ EWS เพื่อ "ตระหนักรู้") และ ตอนที่ III หมวดที่ 4 ข้อ 4.3 (การช่วยฟื้นคืนชีพและการดูแลในภาวะฉุกเฉิน) (เรื่องการ "ตอบสนอง" ผ่าน RRS)
+    
+    CPE408: Un-planed ICU ในผู้ป่วยฉุกเฉิน/ผู้ป่วยวิกฤติ (การรับเข้า ICU โดยไม่ได้วางแผนไว้)
+    [Patient Safety] P 7: Early Recognition and Effective Response to Clinical Deterioration (การตระหนักรู้และตอบสนองต่อภาวะผู้ป่วยทรุดลงอย่างทันท่วงที)    
+    เหตุผล: การที่ผู้ป่วยฉุกเฉิน/วิกฤติ (เช่น ที่ ER หรือหอผู้ป่วย) ต้องย้ายเข้า ICU อย่าง "ไม่ได้วางแผน" (Unplanned) บ่งชี้ถึงปัญหาในการประเมินและจัดการภาวะของผู้ป่วย อาจเกิดจาก:    
+    การประเมินแรกรับ (Initial Assessment): การประเมินความรุนแรง (Triage) ของผู้ป่วยต่ำกว่าความเป็นจริง (Under-triage)    
+    การเฝ้าระวัง (Monitoring): ความล้มเหลวในการตรวจจับสัญญาณเตือน (Early Warning Signs) ว่าผู้ป่วยกำลังทรุดลง    
+    การตอบสนอง (Response): การตอบสนองหรือการส่งต่อผู้ป่วยไปยังการดูแลในระดับที่สูงขึ้น (Escalation of care) ล่าช้า    
+    กระบวนการที่ควรทบทวน:
+    ระบบ Triage ที่ ER: ความแม่นยำของเครื่องมือ Triage และเกณฑ์ในการคัดแยกผู้ป่วย    
+    ระบบ Early Warning Scores (EWS): การใช้และการปฏิบัติตาม EWS ในการเฝ้าระวังผู้ป่วย    
+    ระบบ Rapid Response System (RRS): เกณฑ์การเรียกใช้ RRS และประสิทธิภาพของทีม RRS    
+    เกณฑ์การรับเข้า/จำหน่าย ICU (ICU Admission/Discharge Criteria): ความชัดเจนของเกณฑ์ในการตัดสินใจรับผู้ป่วย
+    
+    มาตรฐาน HA (ฉบับที่ 5): ตอนที่ III หมวดที่ 6 ข. (การส่งต่อผู้ป่วย): เนื่องจากสะท้อนถึงประสิทธิภาพของระบบการดูแลผู้ป่วยฉุกเฉินและการส่งต่อผู้ป่วยไปยังหน่วยวิกฤติ
+    
+    รหัส CPI101: ไม่ล้างมือ/ล้างไม่เหมาะสมตามข้อบ่งชี้ (5 moments)    
+    [Patient Safety] I 1 Hand Hygiene    
+    เหตุผล: เป็นการไม่ปฏิบัติตามหลักสุขอนามัยของมือโดยตรง    
+    กระบวนการที่ควรทบทวน: การสร้างระบบที่เอื้ออำนวย (มีเจลแอลกอฮอล์), การให้ความรู้, การติดตามประเมินผล, และการสร้างวัฒนธรรมความปลอดภัย    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 4 ข้อ 4.2 ก. (1)
+
+    รหัส CPI201 (CAUTI), CPI202 (VAP), CPI203 (CLABSI), CPI205 (PLABSI):
+
+    [Patient Safety] I 2.1 (CAUTI), I 2.2 (VAP), I 2.3 (CLABSI)    
+    เหตุผล: เป็นการติดเชื้อที่เกี่ยวข้องกับอุปกรณ์ทางการแพทย์โดยตรง ซึ่งมีแนวทางปฏิบัติเพื่อป้องกันที่ชัดเจน    
+    กระบวนการที่ควรทบทวน: การปฏิบัติตาม Care Bundles ของแต่ละประเภทการติดเชื้อ เช่น การประเมินความจำเป็นทุกวันเพื่อถอดอุปกรณ์ออกโดยเร็ว    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 4 ข้อ 4.2 ก. (4)
+
+    รหัส CPI204, GPI101, GPI102: ไม่ปฏิบัติตาม Standard Precautions, บุคลากรถูกของมีคมตำ/สัมผัสเลือด    
+    [Patient/Personnel Safety] I 3 Isolation Precautions    
+    เหตุผล: Standard Precautions เป็นส่วนหนึ่งของมาตรการป้องกันการติดเชื้อที่ต้องใช้กับผู้ป่วยทุกราย    
+    กระบวนการที่ควรทบทวน: การล้างมือ และการสวมใส่อุปกรณ์ป้องกันส่วนบุคคล (PPE) อย่างถูกต้อง    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 4 ข้อ 4.2 ก. (1)
+
+    รหัส CPI301-303, CPI401, GPI201-204: การระบาดของโรค, การติดเชื้อดื้อยา, บุคลากรติดเชื้อจากการทำงาน    
+    [Patient/ Personnel Safety] I 3 (Isolation Precautions), I 4 (MDRO)    
+    เหตุผล: การควบคุมการระบาดและการจัดการเชื้อดื้อยาต้องอาศัยมาตรการป้องกันการแพร่กระจายเชื้อที่เข้มงวด    
+    กระบวนการที่ควรทบทวน: การใช้มาตรการป้องกันตามช่องทางการแพร่เชื้อ (Contact, Droplet, Airborne), ระบบเฝ้าระวัง, การใช้ยาอย่างสมเหตุผล, และการทำความสะอาดสิ่งแวดล้อม    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 4 ข้อ 4.2 ก. (4)
+
+    กลุ่ม: ความปลอดภัยด้านยา (CPM)
+
+    รหัส CPM101-107: แพ้ยาซ้ำ, High Alert Drug, Fatal Drug Interaction    
+    [Patient Safety] M 1.1 (High Alert Drug), M 1.2 (Preventable ADR), M 1.3 (Fatal Drug Interaction)    
+    เหตุผล: เป็นอุบัติการณ์ด้านยาที่มีความเสี่ยงสูงและมีแนวทางป้องกันเฉพาะ    
+    กระบวนการที่ควรทบทวน: ระบบการบันทึกและแจ้งเตือนประวัติแพ้ยา, การทำ Double-checks ยาเสี่ยงสูง, การใช้ระบบ IT ช่วยเตือนปฏิกิริยาระหว่างยา    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 6 (MMS) ข้อ 6.1 และ 6.2
+
+    รหัส CPM201-208: Medication error, LASA    
+    [Patient Safety] M 2.1 (LASA), M 2.2 (Safe from Using Medication)    
+    * **เหตุผลที่เกี่ยวข้อง:** ความคลาดเคลื่อนทางยาสามารถเกิดขึ้นได้ในทุกขั้นตอนของกระบวนการใช้ยา
+    * **กระบวนการที่ควรทบทวนและปรับปรุง:**
+        * **สั่งใช้ (Prescribing):** ส่งเสริมการใช้ระบบคอมพิวเตอร์ (CPOE), หลีกเลี่ยงคำย่อที่ไม่ปลอดภัย
+        * **คัดลอก (Transcribing):** ลดขั้นตอนการคัดลอกที่ไม่จำเป็น
+        * **จัดเตรียม/จ่าย (Dispensing):** การจัดยาสำหรับผู้ป่วยเฉพาะราย (Unit dose system), การตรวจสอบโดยเภสัชกร
+        * **บริหารยา (Administration):** การปฏิบัติตามหลัก 6R (Right Patient, Drug, Dose, Route, Time, Documentation) อย่างเคร่งครัด
+    * **มาตรฐาน HA ที่เกี่ยวข้อง:** ตอนที่ III หมวดที่ 5 (MMU) ทั้งหมด
+
+    รหัส CPM301-304: Medication Reconciliation    
+    [Patient Safety] M 3 Medication Reconciliation    
+    เหตุผล: ความคลาดเคลื่อนจากการไม่กระทบยอดรายการยา    
+    กระบวนการที่ควรทบทวน: กระบวนการรวบรวมรายการยา, เปรียบเทียบกับยาที่สั่งใหม่, และสื่อสารรายการยาที่ถูกต้อง    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 6 (MMS) ข้อ 6.2 ก. (2)
+
+    รหัส CPM401-404: Rational Drug Use    
+    [Patient Safety] M 4 Rational Drug Use (RDU)    
+    เหตุผล: การใช้ยาไม่สมเหตุผล    
+    กระบวนการที่ควรทบทวน: การทำงานของคณะกรรมการ PTC, ตัวชี้วัดการใช้ยาที่ไม่สมเหตุผล (เช่น การใช้ยาปฏิชีวนะ)    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 6 (MMS) ข้อ 6.1 และ 6.2
+
+    รหัส CPM501-506: Blood Transfusion Safety    
+    [Patient Safety] M 5 Blood Transfusion Safety    
+    เหตุผล: ความผิดพลาดในกระบวนการให้เลือด    
+    กระบวนการที่ควรทบทวน: การระบุตัวผู้ป่วย (Positive patient identification), การตรวจสอบซ้ำโดยบุคลากร 2 คน, และการเฝ้าระวังภาวะแทรกซ้อน (Hemovigilance)    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 7 ข้อ 7.4 (DIN.4)
+
+    กลุ่ม: ความปลอดภัยเกี่ยวกับสายสวนและห้องปฏิบัติการ (CPL)    
+    รหัส CPL101-103: ท่อเลื่อนหลุด, Mis-connect, Dis-connect, Infusion pump error    
+    [Patient Safety] L 1 Catheter, Tubing Connection, and Infusion Pump    
+    * **เหตุผลที่เกี่ยวข้อง:** การเลื่อนหลุดของท่อช่วยหายใจ (Unplanned extubation) เป็นภาวะฉุกเฉินที่ป้องกันได้ซึ่งอาจนำไปสู่ภาวะพร่องออกซิเจนและอันตรายถึงชีวิต
+    * **กระบวนการที่ควรทบทวนและปรับปรุง:**
+        * เทคนิคและวิธีการยึดตรึงท่อช่วยหายใจ (Tube securement) ให้มั่นคง
+        * การประเมินและจัดการผู้ป่วยที่มีความเสี่ยงสูงต่อการดึงท่อ (เช่น ผู้ป่วยสับสน, กระสับกระส่าย)
+        * การสื่อสารในทีมเมื่อต้องมีการเคลื่อนย้ายหรือจัดท่าผู้ป่วยที่ใส่ท่อช่วยหายใจ
+    * **มาตรฐาน HA ที่เกี่ยวข้อง:** ตอนที่ III หมวดที่ 4 (Patient Care Delivery)
+
+    รหัส CPL201-203: ผลแล็บ/รังสีผิดพลาด, สิ่งส่งตรวจไม่เหมาะสม    
+    [Patient Safety] L 2 Right and Accurate Laboratory Results    
+    เหตุผล: ความผิดพลาดในขั้นตอนก่อนการวิเคราะห์    
+    กระบวนการที่ควรทบทวน: การระบุตัวผู้ป่วย, การเก็บสิ่งส่งตรวจ, การติดฉลาก, และการรักษาสภาพสิ่งส่งตรวจ    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 7 ข้อ 7.2 (DIN.2) ข.(1), (2), (3) และ (4)
+
+    กลุ่ม: กระบวนการดูแลผู้ป่วย (CPP)
+
+    **CPP101: Patient Identification**
+    * **เป้าหมายความปลอดภัย (SIMPLE Goal):** P 1 (Patient Identification)
+    * **เหตุผลที่เกี่ยวข้อง:** การระบุตัวผู้ป่วยผิดพลาดเป็นรากของความผิดพลาดร้ายแรงมากมาย (ให้ยาผิด, ผ่าตัดผิด, ให้เลือดผิด)
+    * **กระบวนการที่ควรทบทวนและปรับปรุง:**
+        * การใช้ตัวบ่งชี้อย่างน้อย 2 อย่าง (เช่น ชื่อ-สกุล และ HN) ในการยืนยันตัวตนผู้ป่วย **ทุกครั้ง** ก่อนให้การดูแล/ทำหัตถการ
+        * ส่งเสริมให้ผู้ป่วยมีส่วนร่วมในการยืนยันตัวตน (Active patient involvement)
+        * ความถูกต้องของป้ายข้อมือและเอกสารที่เกี่ยวข้องทั้งหมด
+    * **มาตรฐาน HA ที่เกี่ยวข้อง:** ตอนที่ III หมวดที่ 1 (Access & Entry (8))
+
+    รหัส CPP201-207: Communication Errors    
+    [Patient Safety] P 2.1 (ISBAR), P 2.2 (Hand Over), P 2.3 (Critical Test Results), P 2.4 (Verbal Order), P 2.5 (Abbreviations)    
+    เหตุผล: ความผิดพลาดในการสื่อสารรูปแบบต่างๆ    
+    กระบวนการที่ควรทบทวน: การนำเครื่องมือสื่อสารที่เป็นมาตรฐานมาใช้ เช่น ISBAR, Read-back และการกำหนดรายการคำย่อที่ห้ามใช้    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 (Patient Care Delivery) (5), หมวดที่ 6 (COC) (6), หมวดที่ 2 (ASM) ข.(3)
+
+    รหัส CPP301: Misdiagnosis or delay diagnosis    
+    [Patient Safety] P 3 Reduction of Diagnostic Errors    
+    เหตุผล: การวินิจฉัยผิดพลาดหรือล่าช้า    
+    กระบวนการที่ควรทบทวน: การเรียนรู้จากข้อผิดพลาด, การวางระบบรายงานผลตรวจให้ครบวงจร, ส่งเสริมการใช้ความเห็นที่สอง    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 2 (ASM) ค.การวินิจโรค (4)
+    
+    รหัส CPP401: ผู้ป่วยเกิดภาวะแทรกซ้อนจากกระบวนการดูแลรักษาพยาบาลซึ่งป้องกันได้ (ยกเว้น เกิดแผลกดทับ, ตกเตียง/fall)
+    [Patient Safety]
+    เหตุผล: เป็นภาวะแทรกซ้อนที่ป้องกันได้ซึ่งมีแนวทางปฏิบัติเฉพาะ    
+    กระบวนการที่ควรทบทวน: การประเมินความเสี่ยงด้วยเครื่องมือมาตรฐาน และการให้การดูแลป้องกันตามระดับความเสี่ยง    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 3 ข้อ 3.1 (PLN.1) (2), (3) และ (7)
+     
+    **CPP402: ผู้ป่วยพยายามฆ่าตัวตาย/ฆ่าตัวตาย**
+    * **เป้าหมายความปลอดภัย (SIMPLE Goal):** E 2 (Suicide Prevention)
+    * **เหตุผลที่เกี่ยวข้อง:** เป็นเหตุการณ์ที่ป้องกันได้ หากมีระบบการประเมินความเสี่ยง การเฝ้าระวัง และการจัดการสภาพแวดล้อมที่เหมาะสม
+    * **กระบวนการที่ควรทบทวนและปรับปรุง:**
+        * กระบวนการคัดกรองและประเมินความเสี่ยงต่อการฆ่าตัวตายในผู้ป่วยกลุ่มเสี่ยง
+        * มาตรการเฝ้าระวังผู้ป่วยกลุ่มเสี่ยงอย่างใกล้ชิด
+        * การจัดการสิ่งแวดล้อมทางกายภาพเพื่อลดความเสี่ยง
+    * **มาตรฐาน HA ที่เกี่ยวข้อง:** ตอนที่ III หมวดที่ 2 (ASM.4), ตอนที่ II หมวดที่ 4 (ENV.3) 
+     
+    รหัส CPP404, CPP405: เกิดแผลกดทับ, พลัดตกหกล้ม    
+    [Patient Safety] P 4.1 (Pressure Ulcers), P 4.2 (Patient Falls)    
+    เหตุผล: เป็นภาวะแทรกซ้อนที่ป้องกันได้ซึ่งมีแนวทางปฏิบัติเฉพาะ    
+    กระบวนการที่ควรทบทวน: การประเมินความเสี่ยงด้วยเครื่องมือมาตรฐาน และการให้การดูแลป้องกันตามระดับความเสี่ยง    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 3 ข้อ 3.1 (PLN.1) (2), (3) และ (7)
+
+    รหัส CPP501-506: Pain Management    
+    [Patient Safety] P 5.1-P 5.4 (Pain Management)    
+    เหตุผล: การจัดการความปวดที่ไม่เหมาะสม    
+    กระบวนการที่ควรทบทวน: การประเมินความปวดเป็นสัญญาณชีพที่ 5, การรักษาแบบผสมผสาน, การประเมินซ้ำ, และแนวทางการใช้ยา Opioids อย่างปลอดภัย    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 4 ข้อ 4.3 จ.การจัดการความปวด (1), (2) และ (3)
+
+    รหัส CPP601-602: Refer and Transfer    
+    [Patient Safety] P 6 Refer and Transfer Safety    
+    เหตุผล: ปัญหาในการส่งต่อผู้ป่วย    
+    กระบวนการที่ควรทบทวน: การใช้หลัก "ACCEPT" ในการเตรียมความพร้อม และ "CLEAR" ในการส่งมอบผู้ป่วย    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 1 (Access & Entry), หมวดที่ 4 (Patient Care Delivery), และหมวดที่ 6 (CDC)
+
+    **CPS101-103: ผ่าตัดผิดตำแหน่ง ผิดข้าง / ผิดคน / ผิดชนิด**
+    * **เป้าหมายความปลอดภัย (SIMPLE Goal):** S 1 (Surgical Safety)
+    * **เหตุผลที่เกี่ยวข้อง:** เป็น Sentinel Events ที่ต้องป้องกันไม่ให้เกิดขึ้นโดยเด็ดขาด ผ่านกระบวนการ Universal Protocol
+    * **กระบวนการที่ควรทบทวนและปรับปรุง:**
+        * **Sign In:** การยืนยันตัวตนผู้ป่วย, ตำแหน่ง, และหัตถการ ก่อนให้ยาระงับความรู้สึก
+        * **Time Out:** การหยุดทวนสอบโดยทีมผ่าตัดทุกคน ก่อนลงมีด
+        * **Sign Out:** การทวนสอบหลังผ่าตัดเสร็จสิ้น
+        * การทำเครื่องหมายตำแหน่งผ่าตัด (Site Marking) ที่ชัดเจน
+    * **มาตรฐาน HA ที่เกี่ยวข้อง:** ตอนที่ III หมวดที่ 4  (Patient Care Delivery) ข. การผ่าตัด
+    
+    รหัส CPS106: Perioperative hemorrhage or hematoma (การตกเลือดหรือมีก้อนเลือดในระยะเวลาผ่าตัด)
+    [Patient Safety] S 1: Safe Surgery (การผ่าตัดที่ปลอดภัย)    
+    เหตุผล: เหตุการณ์นี้เป็นภาวะแทรกซ้อนร้ายแรงที่เกี่ยวข้องโดยตรงกับกระบวนการผ่าตัด (Surgical Process) สะท้อนถึงความล้มเหลวที่อาจเกิดขึ้นได้ใน 3 ระยะ:    
+    ก่อนผ่าตัด (Pre-op): การประเมินความเสี่ยงด้านการแข็งตัวของเลือด (Coagulation) หรือการจัดการยาต้านการแข็งตัวของเลือด (Anticoagulants)    
+    ระหว่างผ่าตัด (Intra-op): เทคนิคการผ่าตัด, การห้ามเลือด (Hemostasis) ที่ไม่สมบูรณ์, หรือการสื่อสารในทีมผ่าตัด    
+    หลังผ่าตัด (Post-op): การเฝ้าระวังและติดตามสัญญาณชีพ, สารคัดหลั่งจากแผล หรือสิ่งผิดปกติที่แผลผ่าตัด    
+    กระบวนการที่ควรทบทวน:    
+    การปฏิบัติตาม Surgical Safety Checklist (โดยเฉพาะการทบทวนความเสี่ยงเลือดออก)    
+    กระบวนการประเมินผู้ป่วยก่อนผ่าตัด (Pre-anesthetic/Pre-surgical assessment)    
+    เกณฑ์และแนวทางในการเฝ้าระวังผู้ป่วยหลังผ่าตัด (Post-operative monitoring)    
+    การทบทวนเทคนิคการผ่าตัด (Surgical technique review)    
+    มาตรฐาน HA (ฉบับที่ 5): ตอนที่ III หมวดที่ 4  (Patient Care Delivery) ข. การผ่าตัด
+    
+    **CPS111: SSI: Surgical Site Infection**
+    * **เป้าหมายความปลอดภัย (SIMPLE Goal):** S 1 (Surgical Safety), I 1 (Infection Control)
+    * **เหตุผลที่เกี่ยวข้อง:** เป็นภาวะแทรกซ้อนที่ป้องกันได้โดยการปฏิบัติตามแนวทางป้องกันการติดเชื้อในตำแหน่งผ่าตัด
+    * **กระบวนการที่ควรทบทวนและปรับปรุง:**
+        * การปฏิบัติตาม SSI Bundle (เช่น การให้ยาปฏิชีวนะป้องกันที่เหมาะสมและทันเวลา, การควบคุมระดับน้ำตาลในเลือด, การควบคุมอุณหภูมิกายผู้ป่วย)
+        * เทคนิคปลอดเชื้อในห้องผ่าตัด
+        * การดูแลแผลผ่าตัดหลังผ่าตัด
+    * **มาตรฐาน HA ที่เกี่ยวข้อง:** ตอนที่ II หมวดที่ 5 (IC), ตอนที่ III หมวดที่ 4  (Patient Care Delivery) ข. การผ่าตัด
+    
+    **CPS307: การมีอุปกรณ์หรือสิ่งตกค้างอื่นใดในร่างกายผู้ป่วย**
+    * **เป้าหมายความปลอดภัย (SIMPLE Goal):** S 1 (Surgical Safety)
+    * **เหตุผลที่เกี่ยวข้อง:** เป็น Sentinel Event ที่ป้องกันได้โดยตรงผ่านกระบวนการนับเครื่องมือและอุปกรณ์อย่างเป็นระบบ
+    * **กระบวนการที่ควรทบทวนและปรับปรุง:**
+        * กระบวนการนับผ้าซับเลือด, เครื่องมือ, และของมีคม ที่เป็นมาตรฐาน (ก่อนเริ่ม, ก่อนปิดแผล, และหลังปิดแผล)
+        * การสื่อสารที่ชัดเจนในทีมเมื่อมีการเปลี่ยนกะหรือเปลี่ยนบุคลากรระหว่างผ่าตัด
+        * การใช้เทคโนโลยีช่วย เช่น ผ้าซับเลือดที่มีแถบตรวจจับด้วยรังสี
+    * **มาตรฐาน HA ที่เกี่ยวข้อง:** ตอนที่ III หมวดที่ 4 (Patient Care Delivery) ข. การผ่าตัด
+    
+    ---
+    
+    ### **กลุ่ม CSD, CSM, CSS, ฯลฯ: Specialty-Specific Complications**
+    (รหัสกลุ่มนี้ส่วนใหญ่เป็นภาวะแทรกซ้อนของโรคหรือหัตถการเฉพาะทาง การวิเคราะห์จะเน้นที่การป้องกันและการตอบสนองต่อภาวะวิกฤต)
+    
+    **CSM201: เกิด CHF/Arrhythmia/Cardiogenic shock ใน AMI**
+    * **เป้าหมายความปลอดภัย (SIMPLE Goal):** E 1 (Emergency Response)
+    * **เหตุผลที่เกี่ยวข้อง:** ภาวะแทรกซ้อนเหล่านี้เป็นสิ่งที่อาจเกิดขึ้นได้ในผู้ป่วยกล้ามเนื้อหัวใจขาดเลือดเฉียบพลัน การเฝ้าระวังและตอบสนองที่รวดเร็วเป็นสิ่งสำคัญ
+    * **กระบวนการที่ควรทบทวนและปรับปรุง:**
+        * แนวทางการเฝ้าระวังและติดตามผู้ป่วย AMI ในหอผู้ป่วยวิกฤต (CCU)
+        * ความพร้อมของยาและอุปกรณ์ช่วยชีวิตฉุกเฉิน
+        * เกณฑ์ในการปรึกษาแพทย์ผู้เชี่ยวชาญหรือพิจารณาทำหัตถการเพิ่มเติม
+    * **มาตรฐาน HA ที่เกี่ยวข้อง:** ตอนที่ III หมวดที่ 4 (Patient Care Delivery) การเฝ้าระวัง
+    
+    **CSM607: เกิดภาวะแทรกซ้อนฉุกเฉินในโรค Dengue fever (เช่น Shock/Bleeding)**
+    * **เป้าหมายความปลอดภัย (SIMPLE Goal):** E 1 (Emergency Response)
+    * **เหตุผลที่เกี่ยวข้อง:** ผู้ป่วยไข้เลือดออกสามารถเข้าสู่ภาวะช็อกได้อย่างรวดเร็ว การตรวจจับสัญญาณเตือนและการให้สารน้ำที่ถูกต้องและทันท่วงทีเป็นหัวใจของการรักษา
+    * **กระบวนการที่ควรทบทวนและปรับปรุง:**
+        * แนวทางการติดตามสัญญาณชีพและค่าความเข้มข้นของเลือด (Hct) อย่างใกล้ชิด
+        * แนวทางการให้สารน้ำตามเกณฑ์มาตรฐานสำหรับผู้ป่วยไข้เลือดออก
+        * การให้ความรู้ผู้ป่วยและญาติในการสังเกตอาการอันตราย
+    * **มาตรฐาน HA ที่เกี่ยวข้อง:** ตอนที่ III หมวดที่ 4 (Patient Care Delivery) 
+    
+    **CSS105: เกิด Intracranial hemorrhage ในโรค Head injury**
+    * **เป้าหมายความปลอดภัย (SIMPLE Goal):** E 1 (Emergency Response)
+    * **เหตุผลที่เกี่ยวข้อง:** การมีเลือดออกในสมองเป็นภาวะแทรกซ้อนที่รุนแรงและต้องได้รับการวินิจฉัยและรักษาอย่างเร่งด่วน การเฝ้าระวังการเปลี่ยนแปลงของระดับความรู้สึกตัวเป็นสิ่งสำคัญ
+    * **กระบวนการที่ควรทบทวนและปรับปรุง:**
+        * แนวทางการประเมินและติดตามอาการทางระบบประสาท (Neurological signs)
+        * เกณฑ์ในการส่งตรวจ CT scan สมองอย่างเร่งด่วน
+        * การประสานงานกับทีมศัลยแพทย์ระบบประสาท
+    * **มาตรฐาน HA ที่เกี่ยวข้อง:** ตอนที่ III หมวดที่ 4 (Patient Care Delivery) การเฝ้าระวัง
+
+    กลุ่ม: สิ่งแวดล้อมและความปลอดภัยทั่วไป (GPE, GPL)
+
+    รหัส GPE101: อันตรายจากโครงสร้างและสิ่งแวดล้อมกายภาพ    
+    [Personnel Safety] S 3.1 Safe Environment    
+    เหตุผล: แม้อยู่ในหมวดศัลยกรรม แต่หลักการจัดการสิ่งแวดล้อมให้ปลอดภัยสามารถประยุกต์ใช้ได้ทั่วทั้งโรงพยาบาล    
+    กระบวนการที่ควรทบทวน: ระบบระบายอากาศ, การควบคุมอุณหภูมิและความชื้น, การประเมินปัจจัยเสี่ยงด้านสิ่งแวดล้อม    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 4 ข้อ 4.2 (IC2) ก.(2) และตอนที่ III หมวดที่ 4 ข้อ 4.3 (Patient Care Delivery) 
+
+    รหัส GPE102: ห้องแยกโรคระบายอากาศไม่เหมาะสม    
+    [Personnel Safety] I 3 Isolation Precautions    
+    เหตุผล: การทำงานของห้องแยกโรคที่ไม่เหมาะสมเป็นความล้มเหลวของมาตรการป้องกันการแพร่กระจายเชื้อ    
+    กระบวนการที่ควรทบทวน: การออกแบบและบำรุงรักษาห้องแยก โดยเฉพาะห้องความดันลบ    
+    มาตรฐาน HA: ตอนที่ II หมวดที่ 4 ข้อ 4.2 ก. (1)
+
+    รหัส GPL101-106: ความปลอดภัยของรถพยาบาลและการส่งต่อ    
+    [Personnel Safety] P 6 Refer and Transfer Safety    
+    เหตุผล: ความปลอดภัยของยานพาหนะและบุคลากรเป็นส่วนหนึ่งของกระบวนการส่งต่อที่ปลอดภัย    
+    กระบวนการที่ควรทบทวน: การเตรียมความพร้อมของทรัพยากร (ยานพาหนะ, อุปกรณ์), การบริหารความเสี่ยงขณะส่งต่อ    
+    มาตรฐาน HA: ตอนที่ III หมวดที่ 6 (CDC) ข้อย่อย (2)       
+
+    ### **หมวดหมู่: General Safety and Processes (ความปลอดภัยทั่วไปและกระบวนการ)**
+
+    #### **กลุ่ม: ความปลอดภัยและสิ่งแวดล้อมในการทำงาน (GPE, GPP)**
+
+    * **รหัส GPE101:** อันตรายจากโครงสร้างอาคารสถานที่และสิ่งแวดล้อมเชิงกายภาพ เช่น แสง เสียง ฝุ่นละออง มีเชื้อรา เป็นต้น
+    * **รหัส GPP201:** องค์กรเกิดภาวะที่คุกคามบุคลากรด้านกายภาพ ได้แก่ เสียงดัง (noise) แสงสว่าง (light) ความร้อน (heat)
+    * **รหัส GPP202:** บุคลากรไม่ได้รับ/ ไม่ได้ใช้อุปกรณ์ หรือใช้ไม่ถูกต้องในการป้องกันและคุ้มครองความปลอดภัยทางกายภาพ
+    * **รหัส GPP203:** บุคลากรเกิดโรคจากการทำงาน ซึ่งมีสาเหตุจาก Physical Hazard
+        * [cite_start]**[Personnel Safety]** P 2.1 Physical Hazard (สิ่งคุกคามทางกายภาพ) [cite: 2073]
+        * [cite_start]**เหตุผล:** อุบัติการณ์เหล่านี้เกี่ยวข้องโดยตรงกับสิ่งคุกคามทางกายภาพในที่ทำงาน ซึ่งส่งผลกระทบต่อสุขภาพของบุคลากรทั้งแบบเฉียบพลันและเรื้อรัง [cite: 2079]
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]ประเมินความเสี่ยงต่อความร้อน แสงสว่าง และเสียง ตามมาตรฐานหรือกฎกระทรวงที่เกี่ยวข้อง [cite: 2084]
+            * [cite_start]ดำเนินการปรับปรุงแก้ไขในจุดที่มีค่าเกินขีดจำกัดความปลอดภัย [cite: 2086]
+            * [cite_start]จัดหาและติดตามการสวมใส่อุปกรณ์คุ้มครองความปลอดภัยส่วนบุคคล (PPE) ที่ได้มาตรฐานและเหมาะสม [cite: 2088]
+            * [cite_start]จัดทำมาตรการอนุรักษ์การได้ยิน สำหรับบุคลากรที่ต้องทำงานสัมผัสเสียงดัง [cite: 2090]
+        * **มาตรฐาน HA:** ตอนที่ I หมวดที่ 5 ข้อ 5.1 ค. [cite_start]สุขภาพและความปลอดภัยของกำลังคน (1), (2), (3) และ (4), ตอนที่ II หมวดที่ 3 ข้อ 3.1 สิ่งแวดล้อมทางกายภาพและความปลอดภัย (ENV.1) [cite: 2110, 2111]
+
+    * **รหัส GPE201-GPE203:** บุคลากรได้รับผลกระทบทางจิตสังคม, ไม่มี work-life balance, บรรยากาศในการทำงานไม่เหมาะสม
+    * **รหัส GPM101-GPM104:** เจ้าหน้าที่ทะเลาะกัน, ถูกคุกคามทางจิตใจ, มีภาวะ second victim, มีภาวะเครียดจากการทำงาน
+        * [cite_start]**[Personnel Safety]** M 1.1 (Mindfulness at Work), M 1.2 (Second Victim), M 1.3 (Burnout and Mental Health Disorder) [cite: 1853, 1882, 1919]
+        * **เหตุผล:** ปัญหาเหล่านี้สะท้อนถึงสภาวะทางจิตใจและสังคมของบุคลากร ซึ่งเกิดจากความเครียด ภาระงาน และผลกระทบจากเหตุการณ์ไม่พึงประสงค์
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]**Mindfulness:** จัดให้มีการทำสมาธิ, มีสัญญาณเตือนให้กลับมามีสติในงาน, และใช้หลักสติสนทนาในการสื่อสารและประชุม [cite: 1861, 1862, 1863]
+            * [cite_start]**Second Victim:** จัดให้มีทีมดูแลบุคลากรที่เกี่ยวข้องกับเหตุการณ์ไม่พึงประสงค์ (emotional "first aid"), ผู้บังคับบัญชาและเพื่อนร่วมงานให้กำลังใจ, และมีกระบวนการ RCA ที่สร้างสรรค์และไม่กล่าวโทษ [cite: 1899, 1903, 1904]
+            * [cite_start]**Burnout:** จัดสิ่งแวดล้อมให้ผ่อนคลาย, ลดภาระงานที่ไม่จำเป็น, มีระบบดูแลช่วยเหลือ (Employer Assistance Program: EAP) ที่เข้าถึงง่ายและเป็นความลับ [cite: 1931, 1932, 1934]
+        * **มาตรฐาน HA:** ตอนที่ I หมวดที่ 1 ข้อ 1.1 ค. (1), ตอนที่ I หมวดที่ 5 ข้อ 5.1 ข. (1), (2), และข้อ 5.2 ก. (1)[cite_start], (2), (3) [cite: 1878, 1916, 1953]
+
+    * **รหัส GPE204:** บุคลากรได้ทำงานในตำแหน่งที่ไม่มีความชำนาญ และไม่มีการเตรียมความพร้อม
+        * [cite_start]**[Personnel Safety]** P 1 Fundamental Guideline for Prevention of Work-Related Disorder [cite: 2003]
+        * **เหตุผล:** การมอบหมายงานที่ไม่เหมาะสมกับทักษะและความสามารถเป็นความเสี่ยงต่อทั้งบุคลากรและองค์กร ซึ่งระบบบริหารจัดการด้านอาชีวอนามัยและความปลอดภัยที่ดีควรจะครอบคลุมถึงประเด็นนี้
+        * [cite_start]**กระบวนการที่ควรทบทวน:** ทบทวนแผนงานและแผนงบประมาณด้านอาชีวอนามัยและความปลอดภัย, โดยเฉพาะในส่วนที่เกี่ยวกับความปลอดภัยของบุคลากรและการจัดสรรงานให้เหมาะสมกับทักษะ [cite: 2020]
+        * **มาตรฐาน HA:** ตอนที่ I หมวดที่ 5 ข้อ 5.1 สภาพแวดล้อมของกำลังคน (WKF.1) ค. [cite_start]สุขภาพและความปลอดภัยของกำลังคน [cite: 2065, 2066]
+
+    * **รหัส GPE205, GPE206:** เกิดปัญหาด้านการจัดการสภาพแวดล้อม (ไม่มีป้ายบอกทาง, ทางหนีไฟ, ลิฟต์ขัดข้อง, ระบบน้ำ/ไฟฟ้าไม่พร้อมใช้)
+        * [cite_start]**[Personnel Safety]** E 1 Safe Physical Environment [cite: 1581]
+        * **เหตุผล:** ปัญหาเหล่านี้เป็นความบกพร่องของสิ่งแวดล้อมทางกายภาพที่อาจส่งผลกระทบต่อความปลอดภัยของบุคลากรและผู้ป่วยโดยตรง
+        * [cite_start]**กระบวนการที่ควรทบทวน:** ต้องมีการควบคุมคุณภาพของระบบสาธารณูปโภคและโครงสร้างอาคาร, มีแผนการบำรุงรักษาอย่างต่อเนื่อง, และมีระบบการควบคุมและตรวจสอบเพื่อให้มั่นใจว่าทุกระบบพร้อมใช้งาน [cite: 2535, 2536, 2537]
+        * [cite_start]**มาตรฐาน HA:** ตอนที่ I หมวดที่ 3 ข้อ 3.1 สิ่งแวดล้อมทางกายภาพและความปลอดภัย (ENV.1) [cite: 2553]
+
+    * **รหัส GPE301-GPE305:** บุคลากรถูกคุกคาม/ทำร้ายจากบุคคลภายใน/ภายนอก, เกิดเหตุการณ์ความไม่สงบ
+        * [cite_start]**[Personnel Safety]** E 3 Workplace Violence [cite: 2621]
+        * **เหตุผล:** เป็นเหตุการณ์ความรุนแรงในที่ทำงานซึ่งเป็นภัยคุกคามโดยตรงต่อความปลอดภัยของบุคลากร
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]**ระยะป้องกัน:** กำหนดนโยบายไม่ยอมรับความรุนแรง (zero tolerance policy), ควบคุมสิ่งแวดล้อม (ประตู access control, กล้องวงจรปิด), ประสานงานกับตำรวจ, และประเมินความเสี่ยงผู้ป่วย/ญาติที่อาจก่อความรุนแรง [cite: 2631, 2632, 2636]
+            * [cite_start]**ระยะเกิดเหตุ:** มีแนวทางปฏิบัติที่ชัดเจน เช่น ขอความช่วยเหลือ, หลีกหนี, ประสานงานเจ้าหน้าที่ และบันทึกเหตุการณ์ [cite: 2639, 2640, 2641]
+            * [cite_start]**ระยะหลังเกิดเหตุ:** มีการทบทวนหาสาเหตุ (RCA) และเยียวยาบุคลากรที่ได้รับผลกระทบ [cite: 2647, 2648]
+        * **มาตรฐาน HA:** ตอนที่ I หมวดที่ 5 ข้อ 5.1 ค. สุขภาพและความปลอดภัยของกำลังคน (1), ตอนที่ II หมวดที่ 3 ข้อ 3.1 ก. (1), (2), (4), และ (5) และ ค. (1)[cite_start], (2) และ (3) [cite: 2662, 2663]
+
+    * **รหัส GPP101-GPP103:** บุคลากรมีภาระงานมากเกินไป, ไม่ได้รับการป้องกันการติดเชื้อ, ประสบอุบัติเหตุจากการทำงาน
+        * [cite_start]**[Personnel Safety]** P 1 Fundamental Guideline for Prevention of Work-Related Disorder [cite: 2003][cite_start], E 2 Working Conditions [cite: 2559]
+        * **เหตุผล:** เป็นปัญหาพื้นฐานของอาชีวอนามัยและความปลอดภัยที่เกิดจากสภาพการทำงานที่ไม่เหมาะสม
+        * [cite_start]**กระบวนการที่ควรทบทวน:** ทบทวนการบริหารจัดการอัตรากำลังให้เพียงพอกับภาระงาน, จัดชั่วโมงการทำงานและการพักผ่อนให้เพียงพอ, จัดหาอุปกรณ์ป้องกันส่วนบุคคลที่ได้มาตรฐานให้เพียงพอ [cite: 2568, 2573, 2578]
+        * **มาตรฐาน HA:** ตอนที่ I หมวดที่ 5 ข้อ 5.1 ค. [cite_start]สุขภาพและความปลอดภัยของกำลังคน [cite: 2065, 2066]
+
+    * **รหัส GPP204-GPP206:** ความไม่ปลอดภัยจากสารเคมี
+        * [cite_start]**[Personnel Safety]** P 2.2 Chemical Hazard (สิ่งคุกคามด้านสารเคมี) [cite: 2073]
+        * **เหตุผล:** การสัมผัสสารเคมีอันตรายเป็นความเสี่ยงที่ต้องมีระบบการบริหารจัดการเฉพาะ
+        * [cite_start]**กระบวนการที่ควรทบทวน:** บริหารจัดการตามกฎกระทรวงเกี่ยวกับสารเคมีอันตราย, มีขั้นตอนการปฏิบัติงาน (Work Instruction) ที่ปลอดภัย, ประเมินการสัมผัสสารเคมี, และจัดหา PPE ที่เหมาะสม [cite: 2131, 2132, 2133]
+        * **มาตรฐาน HA:** ตอนที่ I หมวดที่ 5 ข้อ 5.1 ค. สุขภาพและความปลอดภัยของกำลังคน (1), (2), (3) และ (4), ตอนที่ II หมวดที่ 3 ข้อ 3.1 ข. [cite_start]วัสดุและของเสียอันตราย [cite: 2156, 2157, 2158]
+
+    * **รหัส GPP207-GPP209:** ความไม่ปลอดภัยจากรังสี
+        * [cite_start]**[Personnel Safety]** P 2.3 Radiation Hazard (สิ่งคุกคามรังสีชนิดก่อไอออน) [cite: 2073]
+        * **เหตุผล:** การทำงานกับรังสีเป็นความเสี่ยงสูงและมีกฎหมายควบคุมเฉพาะ
+        * [cite_start]**กระบวนการที่ควรทบทวน:** ปฏิบัติตามกฎกระทรวงเกี่ยวกับรังสีก่อไอออน, ใช้หลักการ ALARA (As Low As Reasonably Achievable), จัดให้มีเจ้าหน้าที่ความปลอดภัยทางรังสี (RSO), ตรวจวัดรังสีในพื้นที่และที่ตัวบุคคล, และจัดหาอุปกรณ์ป้องกันรังสี [cite: 2182, 2183, 2184]
+        * **มาตรฐาน HA:** ตอนที่ I หมวดที่ 5 ข้อ 5.1 ค. สุขภาพและความปลอดภัยของกำลังคน, ตอนที่ II หมวดที่ 7 ข้อ 7.1 ก. (4) และ ค. (2)[cite_start], (3) [cite: 2206, 2207, 2208]
+
+    * **รหัส GPP210-GPP212:** ปัญหาด้านโครงร่างกระดูกและกล้ามเนื้อจากการทำงาน
+        * [cite_start]**[Personnel Safety]** P 2.4 Biomechanical Hazard (สิ่งคุกคามจากชีวกลศาสตร์) [cite: 2073]
+        * **เหตุผล:** การบาดเจ็บของโครงร่างกระดูกและกล้ามเนื้อเป็นปัญหาที่พบบ่อยในบุคลากรทางการแพทย์
+        * [cite_start]**กระบวนการที่ควรทบทวน:** ประเมินการยศาสตร์ของท่าทางการทำงาน (Ergonomics), จัดกิจกรรมยืดเหยียด, จัดหาเครื่องทุ่นแรงในการยกหรือเคลื่อนย้ายผู้ป่วย, และอบรมทักษะการยกที่ถูกต้อง (manual handling) [cite: 2220, 2223, 2224]
+        * **มาตรฐาน HA:** ตอนที่ I หมวดที่ 5 ข้อ 5.1 ค. [cite_start]สุขภาพและความปลอดภัยของกำลังคน (1), (2), (3) และ (4) [cite: 2234, 2235]
+
+    * **รหัส GPP301-GPP303:** ปัญหาการตรวจสุขภาพบุคลากร
+        * [cite_start]**[Personnel Safety]** P 3.1 (Pre-placement and Return to Work Health Examination), P 3.2 (Medical Surveillance Program) [cite: 2240, 2275]
+        * **เหตุผล:** การตรวจสุขภาพเป็นเครื่องมือสำคัญในการป้องกันโรคจากการทำงานและประเมินความพร้อมของบุคลากร
+        * [cite_start]**กระบวนการที่ควรทบทวน:** ต้องปฏิบัติตามกฎกระทรวงแรงงาน, บุคลากรที่ทำงานเสี่ยงต้องได้รับการตรวจสุขภาพก่อนเข้างานและตรวจตามความเสี่ยงเป็นประจำทุกปี, บุคลากรที่เจ็บป่วยต้องได้รับการประเมินความพร้อมก่อนกลับเข้าทำงาน [cite: 2249, 2285, 2257]
+        * **มาตรฐาน HA:** ตอนที่ I หมวดที่ 5 ข้อ 5.1 ค. [cite_start]สุขภาพและความปลอดภัยของกำลังคน (1), (2), (3) และ (4) [cite: 2271, 2272]
+
+    ---
+    #### **กลุ่ม: ความปลอดภัยในการส่งต่อและประเด็นทางกฎหมาย (GPL)**
+
+    * **รหัส GPL101-GPL106:** อุบัติเหตุรถพยาบาล, อุปกรณ์ไม่พร้อมใช้, พนักงานขับรถไม่พร้อม
+        * [cite_start]**[Personnel Safety]** L 1.1 (In-Transit Ambulance Safety), L 1.2 (On-Site Safety), L 1.3 (Ambulance Driving Safety) [cite: 2311, 2340, 2392]
+        * **เหตุผล:** ความปลอดภัยในการเดินทางและการปฏิบัติการ ณ จุดเกิดเหตุเป็นความเสี่ยงสำคัญของทีมฉุกเฉิน
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]**In-Transit:** ติดตั้งอุปกรณ์ยึดตรึง (เตียง, เก้าอี้, เครื่องมือแพทย์) ให้ได้มาตรฐานทนแรง 10 G [cite: 2320]
+            * [cite_start]**On-Site:** ต้องมีกระบวนการจัดการที่เกิดเหตุให้ปลอดภัย เช่น การสร้างแนวกันชน, การวางกรวยจราจร, การประเมินความเสี่ยงจากสารเคมีหรือระเบิด [cite: 2350, 2371, 2375]
+            * [cite_start]**Driving Safety:** พนักงานขับรถต้องปฏิบัติตามแนวทาง เช่น ไม่ขับเร็วเกิน 80 กม./ชม., ไม่ฝ่าสัญญาณไฟแดง, และผ่านการอบรมหลักสูตรเฉพาะ [cite: 2409, 2410, 2411]
+        * [cite_start]**มาตรฐาน HA:** ตอนที่ III หมวดที่ 6 การดูแลต่อเนื่อง (COC) (3) [cite: 2337, 2389, 2437]
+
+    * **รหัส GPL201-GPL205:** ปัญหาการให้ข้อมูล, การบันทึกเวชระเบียน, การจัดการเวชระเบียน
+        * [cite_start]**[Personnel Safety]** L 2.1 (Informed Consent), L 2.2 (Medical Record and Documentation) [cite: 2442, 2488]
+        * **เหตุผล:** การให้ข้อมูลและการบันทึกเวชระเบียนเป็นหน้าที่ทางจริยธรรมและกฎหมายที่สำคัญ
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]**Informed Consent:** ต้องให้ข้อมูลที่ครบถ้วน (การวินิจฉัย, แนวทางการรักษา, ความเสี่ยง, ทางเลือก) เพื่อให้ผู้ป่วยตัดสินใจ, และมีบันทึกความยินยอมเป็นหลักฐาน [cite: 2455, 2472]
+            * [cite_start]**Medical Record:** ต้องบันทึกให้ถูกต้อง ครบถ้วน อ่านเข้าใจง่าย, มีแนวทางการแก้ไขเวชระเบียนที่ชัดเจน, และมีระบบการคุ้มครองและเก็บรักษาข้อมูลที่เป็นความลับ [cite: 2500, 2503, 2504]
+        * **มาตรฐาน HA:** ตอนที่ III หมวดที่ 1 (Access & Entry) (6) และ (7), ตอนที่ II หมวดที่ 5 ข้อ 5.1 ก. (3) [cite_start]และ (5) และข้อ 5.2 (1) และ (2) [cite: 2485, 2518, 2519]
+
+    ---
+    #### **กลุ่ม: ความปลอดภัยด้านข้อมูลและสื่อสังคมออนไลน์ (GPS)**
+
+    * **รหัส GPS101-GPS106:** ปัญหาความมั่นคงปลอดภัยไซเบอร์, การละเมิดความเป็นส่วนตัวของข้อมูล
+        * [cite_start]**[Personnel Safety]** S 1 Security and Privacy of Information [cite: 1588]
+        * **เหตุผล:** การรั่วไหลหรือถูกแก้ไขข้อมูลโดยไม่ได้รับอนุญาตเป็นความเสี่ยงสำคัญในยุคดิจิทัล
+        * [cite_start]**กระบวนการที่ควรทบทวน:** ต้องมีนโยบายและมาตรการคุ้มครองข้อมูลทั้งทางกายภาพ, การบริหารจัดการ, ผู้ใช้งาน, ระบบเครือข่าย, และตัวข้อมูลเอง (เช่น การสำรองข้อมูล, การเข้ารหัส) รวมถึงมีกระบวนการขอความยินยอมในการใช้และเปิดเผยข้อมูล [cite: 1598, 1601, 1607]
+        * **มาตรฐาน HA:** ตอนที่ I หมวดที่ 4 ข้อ 4.2 ข. [cite_start]การจัดการระบบสารสนเทศ (1) และ (2) [cite: 1627]
+
+    * **รหัส GPS201-GPS204:** ปัญหาจากการใช้สื่อสังคมออนไลน์, เกิดผลกระทบทางลบต่อองค์กร
+        * [cite_start]**[Personnel Safety]** S 2 Social Media and Communication Professionalism [cite: 1631]
+        * **เหตุผล:** การใช้งานสื่อสังคมออนไลน์อย่างไม่เหมาะสมอาจสร้างความเสียหายต่อบุคลากรและองค์กรได้
+        * [cite_start]**กระบวนการที่ควรทบทวน:** ต้องมีแนวทางปฏิบัติในการใช้ Social Media ของบุคลากรที่ชัดเจน, สื่อสารให้เข้าใจทั่วทั้งองค์กร, และมีกระบวนการสื่อสารในภาวะวิกฤต (Crisis Communication) [cite: 1639, 1640, 1650]
+        * **มาตรฐาน HA:** ตอนที่ I หมวดที่ 4 ข้อ 4.2 ข. [cite_start]การจัดการระบบสารสนเทศ (3) [cite: 1664]
+
+    ### **หมวดหมู่: General Safety and Processes (ความปลอดภัยทั่วไปและกระบวนการ)**
+
+    #### **กลุ่ม: การบริหารจัดการองค์กร (GOS, GOE, GOI, GOP)**
+
+    * **รหัส GOS101 - GOS301:** เกิดปัญหาด้านการควบคุมการวางแผน, การปฏิบัติงาน, การติดตามประเมินผล, ความปลอดภัยของอาคารสถานที่และห้องน้ำ
+    * **รหัส GOE101 - GOE201:** เกิดปัญหาด้านการควบคุมการเงินและงบประมาณ
+    * **รหัส GOP101 - GOP201:** เกิดปัญหาด้านการควบคุมภารกิจและกระบวนการบริการ
+        * [cite_start]**[People Safety]** S1 Social Responsibility [cite: 1593]
+        * **เหตุผล:** อุบัติการณ์เหล่านี้สะท้อนถึงความบกพร่องในระบบธรรมาภิบาลและการบริหารจัดการองค์กร ซึ่งเป็นรากฐานของความรับผิดชอบต่อสังคม สถานพยาบาลที่มีความรับผิดชอบต่อสังคมต้องมีกระบวนการบริหารจัดการภายในที่มีประสิทธิภาพและโปร่งใส
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]ผู้นำต้องกำหนดทิศทางและเป้าหมายขององค์กรที่ให้ความสำคัญกับการรับผิดชอบต่อสังคม [cite: 1600]
+            * [cite_start]ทบทวนข้อมูลการดำเนินงานของสถานพยาบาล เช่น การใช้ทรัพยากร, การจัดการของเสีย และการปฏิบัติตามกฎหมายที่เกี่ยวข้อง [cite: 1602]
+            * [cite_start]กำหนดประเด็นสำคัญ, ผู้รับผิดชอบ, และติดตามผลลัพธ์เพื่อการพัฒนาอย่างต่อเนื่อง [cite: 1603]
+            * [cite_start]เปิดรับฟังความคิดเห็นจากประชาชนและสังคมเกี่ยวกับผลกระทบของระบบบริการ [cite: 1609]
+        * [cite_start]**มาตรฐาน HA:** 1-1.2 Governance and Societal Contributions [cite: 1617]
+
+    * **รหัส GOS201, GPE206, GPE205:** อาคารสถานที่/พื้นที่ให้บริการไม่เหมาะสม/ไม่ปลอดภัย, ปัญหาด้านการควบคุมสิ่งแวดล้อม (ระบบน้ำ, ไฟฟ้า, ขยะ)
+        * **[Pesonnel/ People Safety]** S2.1 (Efficient Water Treatment System), S2.2 (Efficient Waste Disposal System), S2.4 (Comply with indoor and outdoor air pollution Standards), P3.2 (Physical Environment for People Safety)
+        * **เหตุผล:** การจัดการสิ่งแวดล้อมทางกายภาพและระบบสาธารณูปโภคที่บกพร่อง เช่น การจัดการน้ำเสียและขยะไม่ดี, ระบบไฟฟ้าขัดข้อง ส่งผลกระทบโดยตรงต่อความปลอดภัยและสุขภาพของประชาชนทั้งในและนอกสถานพยาบาล
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]**น้ำเสีย (S2.1):** จัดให้มีระบบบำบัดน้ำเสียที่เหมาะสม, มีระบบดูแลบำรุงรักษา, และตรวจสอบคุณภาพน้ำทิ้งให้เป็นไปตามมาตรฐาน [cite: 1629, 1634, 1642]
+            * [cite_start]**ขยะ (S2.2):** มีการคัดแยกขยะตามประเภท, รวบรวมและเคลื่อนย้ายในภาชนะที่ถูกต้อง, มีสถานที่พักขยะที่ได้มาตรฐาน และกำจัดตามประเภทอย่างปลอดภัย [cite: 1675, 1677, 1678, 1679, 1680]
+            * [cite_start]**กายภาพ (P3.2):** ประเมินความเสี่ยงด้านสิ่งแวดล้อมเชิงรุก, จัดทำแผนบริหารความเสี่ยง และสื่อสารให้ประชาชนทราบ [cite: 2349]
+        * [cite_start]**มาตรฐาน HA:** II-3.1 Physical Environment and Safety [cite: 1663, 1692][cite_start], II-3.3 Environment for Health Promotion and Environment Protection [cite: 1663, 1692]
+
+    * **รหัส GOI101 - GOI108:** เกิดปัญหาด้านระบบสารสนเทศ (Hardware, Network, Software, Security, Data)
+        * [cite_start]**[People Safety]** I1 Information Privacy and Security [cite: 1834]
+        * **เหตุผล:** ปัญหาด้านเทคโนโลยีสารสนเทศ เช่น ระบบล่ม, ข้อมูลไม่ถูกต้อง หรือข้อมูลรั่วไหล ส่งผลกระทบโดยตรงต่อความต่อเนื่องในการให้บริการและความปลอดภัยของข้อมูลส่วนบุคคลของผู้รับบริการ
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]กำหนดนโยบายด้านความมั่นคงปลอดภัยสารสนเทศและการคุ้มครองข้อมูลส่วนบุคคล [cite: 1845]
+            * [cite_start]มีมาตรการคุ้มครองป้องกันในทุกมิติ: กายภาพ (Physical), บริหารจัดการ (Administrative), ผู้ใช้งาน (User), เครือข่าย (Network), ระบบ (System), และข้อมูล (Data) [cite: 1849]
+            * [cite_start]มีแผนรับมือภัยคุกคามทางไซเบอร์และมีการซ้อมแผนเป็นระยะ [cite: 1869]
+        * [cite_start]**มาตรฐาน HA:** 1-1.2 Governance and Societal Contributions, 1-6.2 Operation Effectiveness (b) Information System Management, II-5.1 Medication Record Management System [cite: 1905]
+
+    * **รหัส GPL201 - GPL205:** ปัญหาการให้ข้อมูล, การบันทึกเวชระเบียน
+        * [cite_start]**[Personnel Safety]** I2 Medical Records Safety and Security [cite: 1836]
+        * **เหตุผล:** เวชระเบียนเป็นเอกสารสำคัญในการสื่อสารเพื่อความต่อเนื่องในการดูแล และเป็นข้อมูลส่วนบุคคลที่ต้องมีการจัดการอย่างปลอดภัย
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]วางแผนและออกแบบระบบการบันทึกเวชระเบียนให้ถูกต้อง ครบถ้วนตามมาตรฐาน [cite: 1917]
+            * [cite_start]มีกลไกตรวจสอบกำกับคุณภาพเวชระเบียนผ่านการ Audit และ KPI [cite: 1925]
+            * [cite_start]มีมาตรการรักษาความปลอดภัยและความลับของข้อมูล ทั้งการจัดเก็บ, การเข้าถึง, และการทำลาย [cite: 1935]
+        * [cite_start]**มาตรฐาน HA:** II-5 Medical Record System [cite: 1970]
+
+    #### **กลุ่ม: ความปลอดภัยและสิ่งแวดล้อมในการทำงาน (GPE, GPP)**
+
+    * **รหัส GPE101, GPE206, GPE205:** อันตรายจากโครงสร้างอาคาร, ปัญหาการควบคุมสิ่งแวดล้อม (น้ำ, ไฟฟ้า, ขยะ), ปัญหาการจัดการสภาพแวดล้อมบริการ
+        * **[People Safety]** S2.1, S2.2, S2.4, P3.2 (ดูรายละเอียดด้านบนในกลุ่ม GOS)
+
+    * **รหัส GPE207:** เกิดปัญหาความไม่ปลอดภัย, ทรัพย์สินสูญหาย/ถูกขโมย
+        * [cite_start]**[People Safety]** P3.2 Physical Environment for People Safety [cite: 2318]
+        * **เหตุผล:** ความปลอดภัยในทรัพย์สินเป็นส่วนหนึ่งของสิ่งแวดล้อมทางกายภาพที่ปลอดภัยสำหรับประชาชนและผู้มารับบริการ
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]มีกระบวนการจัดแบ่งพื้นที่ใช้สอยที่เอื้อต่อความปลอดภัย [cite: 2348]
+            * [cite_start]มีระบบการกำกับดูแล, ตรวจสอบ และรักษาความปลอดภัยอย่างเป็นระบบ [cite: 2348]
+        * [cite_start]**มาตรฐาน HA:** II-3.1 Physical Environment and Safety [cite: 2364][cite_start], II-9.2 Community Empowerment [cite: 2364]
+
+    * **รหัส GPP102:** บุคลากรที่เสี่ยงต่อการติดเชื้อไม่ได้รับการป้องกันที่เหมาะสม
+        * [cite_start]**[People Safety]** P3.1 Infection Prevention and Control (for People Safety) [cite: 2319]
+        * **เหตุผล:** บุคลากรที่ไม่ได้รับการป้องกัน อาจกลายเป็นแหล่งแพร่เชื้อไปสู่ผู้ป่วย ญาติ และประชาชนได้
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]องค์กรต้องออกแบบและควบคุมโครงสร้างอาคารสถานที่เพื่อป้องกันการแพร่กระจายเชื้อ [cite: 2325]
+            * [cite_start]ให้ความรู้แก่บุคลากร ผู้ป่วย และญาติ เกี่ยวกับวิธีการป้องกันการติดเชื้อและการแพร่กระจายเชื้อ [cite: 2326, 2327]
+            * [cite_start]สนับสนุนอุปกรณ์ที่จำเป็น เช่น หน้ากากอนามัย, เจลแอลกอฮอล์ ให้เพียงพอ [cite: 2329]
+        * [cite_start]**มาตรฐาน HA:** II-3.1, II-3.2, II-4 Infection Prevention and Control [cite: 2336]
+
+    #### **กลุ่ม: การสื่อสารและประเด็นทางกฎหมาย (GPS, GPL, GPM)**
+
+    * **รหัส GPS101 - GPS106:** ปัญหาความมั่นคงปลอดภัยไซเบอร์, การละเมิดความเป็นส่วนตัว
+        * **[Personnel/ People Safety]** I1 Information Privacy and Security (ดูรายละเอียดด้านบนในกลุ่ม GOI)
+
+    * **รหัส GPM203 - GPM208:** เกิดเรื่องร้องเรียน, การฟ้องร้องทางคดีต่างๆ
+        * [cite_start]**[Personnel/ People Safety]** L1 Compliances of the Legislation/Regulations and Rules [cite: 2469]
+        * **เหตุผล:** ข้อร้องเรียนและการฟ้องร้องมักมีสาเหตุมาจากการที่ผู้รับบริการรู้สึกว่าไม่ได้รับบริการตามมาตรฐาน หรือมีการละเมิดสิทธิ ซึ่งเกี่ยวข้องโดยตรงกับการปฏิบัติตามกฎหมายและระเบียบต่างๆ
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]สถานพยาบาลต้องปฏิบัติตามกฎหมายและระเบียบที่เกี่ยวข้องกับการให้บริการสุขภาพอย่างเคร่งครัด [cite: 2480]
+            * [cite_start]ให้ความรู้แก่ผู้ป่วยและญาติเกี่ยวกับสิทธิในการรับบริการสุขภาพ [cite: 2482]
+            * [cite_start]มีช่องทางรับฟังความคิดเห็นและเรื่องร้องทุกข์จากผู้ป่วยและประชาชน [cite: 2485]
+        * [cite_start]**มาตรฐาน HA:** 1-1.2, 1-3.2, 1-3.3, II-1.2 [cite: 2496]
+
+    #### **กลุ่ม: การตอบสนองภาวะฉุกเฉิน (CPE)**
+
+    * **รหัส CPE410:** เกิดอุบัติภัยหมู่ที่ให้ความช่วยเหลือได้ไม่ทันเวลา
+    * **รหัส CPE411:** เกิด disaster หรือภาวะฉุกเฉินที่ไม่พึงประสงค์ต่างๆ ที่ ER
+        * [cite_start]**[People Safety]** E1 Emergency/Disaster Preparedness for Safety [cite: 2589]
+        * **เหตุผล:** การตอบสนองต่อภัยพิบัติและภาวะฉุกเฉินเป็นความรับผิดชอบของสถานพยาบาลต่อความปลอดภัยของประชาชนในชุมชน
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]**การป้องกัน (Prevention):** สำรวจและประเมินความเสี่ยงของภัยพิบัติในชุมชนและสถานพยาบาล [cite: 2597]
+            * [cite_start]**การเตรียมความพร้อม (Preparedness):** จัดทำแผนตอบโต้, จัดทีม (DMAT, MERT, MCATT), และซ้อมแผนร่วมกับชุมชนอย่างสม่ำเสมอ [cite: 2652]
+            * [cite_start]**การตอบโต้ (Response):** จัดตั้งศูนย์บัญชาการเหตุการณ์ (EOC) และบริหารสถานการณ์ตามหลัก ICS [cite: 2655]
+            * [cite_start]**การฟื้นฟู (Recovery):** ฟื้นฟูระบบบริการให้กลับมาทำงานได้และดีกว่าเดิม (Build Back Better) [cite: 2656]
+        * [cite_start]**มาตรฐาน HA:** 1-6.2 (c) Safety and Emergency/Disaster Preparedness [cite: 2678]
+
+    * **รหัส GPL104:** เกิดอุบัติเหตุของรถพยาบาลระหว่างปฏิบัติหน้าที่
+        * [cite_start]**[People Safety]** E2 Enhancement of Pre-hospital Emergency Medical Service [cite: 2683]
+        * **เหตุผล:** อุบัติเหตุรถพยาบาลส่งผลกระทบต่อความปลอดภัยของทั้งบุคลากร, ผู้ป่วย และประชาชนผู้ใช้รถใช้ถนน
+        * **กระบวนการที่ควรทบทวน:**
+            * [cite_start]พัฒนาทักษะของบุคลากรที่เกี่ยวข้องกับการแพทย์ฉุกเฉิน [cite: 2489]
+            * [cite_start]สร้างความตระหนักรู้ให้ประชาชนเกี่ยวกับการแจ้งเหตุฉุกเฉินและการหลีกทางให้รถพยาบาล [cite: 2493]
+            * พัฒนาทักษะการขับขี่ปลอดภัยสำหรับพนักงานขับรถพยาบาล (ดูเพิ่มเติมใน Personnel Safety L1.3)
+        * [cite_start]**มาตรฐาน HA:** III-1 Access and Entry, III-6 Continuity of Care [cite: 2710]
+
+    ---        
 
     **รายละเอียดอุบัติการณ์จากผู้ใช้:**
     '''
@@ -350,14 +1049,11 @@ def get_consultation_response(incident_description: str) -> str:
      * **F0010 Patient Factors: Clinical condition**
        * *หลักฐาน:* ผู้ป่วยมีโรคประจำตัวซับซ้อน (ESRD on HD, ประวัติ STEMI)
        * *คำอธิบาย:* สภาวะโรคเดิมของผู้ป่วยเป็นปัจจัยสำคัญที่ทำให้เกิดความเสี่ยงต่อภาวะ Hyperkalemia และหัวใจหยุดเต้นได้ง่ายกว่าปกติ)
-       
-    ### 5. Potential Change
-    (ให้บอก “จุดเปลี่ยนสำคัญ” ที่ถ้าปรับจะลดความเสี่ยงได้มาก (Turning points 2-3 ข้อ))
-    
-    ### 6. ข้อเสนอแนะเบื้องต้น
+
+    ### 5. ข้อเสนอแนะเบื้องต้น
     (เสนอแนวทางการแก้ไขเฉพาะหน้า และ/หรือ การป้องกันในระยะยาวที่เหมาะสมกับเหตุการณ์)
 
-    ### 7. เรียนรู้จาก 3P Safety และมาตรฐาน HA ที่เกี่ยวข้อง
+    ### 6. เรียนรู้จาก 3P Safety และมาตรฐาน HA ที่เกี่ยวข้อง
     จากรหัสอุบัติการณ์ที่กำหนดในข้อ 2 ให้คุณดำเนินการตามขั้นตอนต่อไปนี้:    
     ค้นหารหัสอุบัติการณ์ในฐานข้อมูลความรู้ และตรวจสอบข้อมูลในส่วน "เป้าหมายที่เกี่ยวข้อง"    
     จัดกลุ่มผลลัพธ์ ตาม "safety_GOAL" ทั้ง 3 ประเภท ได้แก่ "Patient Safety", "Personnel Safety", และ "People Safety"   
@@ -367,34 +1063,9 @@ def get_consultation_response(incident_description: str) -> str:
     หากค้นหาแล้ว ไม่พบข้อมูล ใน "เป้าหมายที่เกี่ยวข้อง" เลย (array ว่าง) ให้แสดงข้อความว่า: "สำหรับอุบัติการณ์นี้ ไม่พบเป้าหมายความปลอดภัยที่เกี่ยวข้องโดยตรงในฐานข้อมูล 3P Safety ควรพิจารณาตามบริบทขององค์กรและมาตรฐานวิชาชีพที่เกี่ยวข้อง"
     """
 
-
-    # ✅ เพิ่ม appendix แบบไม่ต้องแก้ก้อนฐานความรู้
-    master_prompt = master_prompt + "\n\n" + PLANNING_INPUTS_APPENDIX
-
     try:
-        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        model = genai.GenerativeModel(model_name)
-
-        # -----------------------
-        # Step 1: Technical consult
-        # -----------------------
-        consult_resp = model.generate_content(master_prompt)
-        consultation_text = _strip_code_fences(getattr(consult_resp, "text", "") or "")
-
-        # -----------------------
-        # Step 2: Executive plan
-        # -----------------------
-        exec_prompt = EXECUTIVE_PLAN_PROMPT_TEMPLATE.format(
-            incident_description=incident_description.strip(),
-            consultation_text=consultation_text.strip(),
-        )
-        exec_resp = model.generate_content(exec_prompt)
-        extra_markdown = (exec_resp.text or "").strip()
-        combined_markdown = consultation_text.strip()
-        if extra_markdown:
-            combined_markdown = combined_markdown + "\n\n" + extra_markdown
-    
-        return combined_markdown
-
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        response = model.generate_content(master_prompt)
+        return response.text
     except Exception as e:
         return f"ขออภัยครับ เกิดข้อผิดพลาดในการเชื่อมต่อกับ AI: {e}"
