@@ -1211,7 +1211,7 @@ colors2 = np.array([["#e1f5fe", "#f6c8b6", "#dd191d", "#dd191d", "#dd191d", "#dd
                     ["#e1f5fe", "#f6c8b6", "#f6c8b6", "#f6c8b6", "#f6c8b6", "#f6c8b6", "#f6c8b6"],
                     ["#e1f5fe", "#e1f5fe", "#e1f5fe", "#e1f5fe", "#e1f5fe", "#e1f5fe", "#e1f5fe"]])
 def display_user_guide():
-    st.markdown("<h2 style='color: #001f3f;'>คู่มือการใช้งาน HOIA-RR Application</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='color: #001f3f;'>คู่มือการใช้งาน HOIA-RR Tool</h2>", unsafe_allow_html=True)
     st.markdown("---")
 
     st.markdown("""
