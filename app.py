@@ -43,6 +43,7 @@ def _safe_get_default_csv_url() -> str:
 
 DEFAULT_CSV_URL = _safe_get_default_csv_url()
 
+@st.cache_data(ttl=600, max_entries=1, show_spinner=False)
 def load_csv_from_url_fallback(url: str) -> pd.DataFrame:
     """
     โหลด CSV จาก GitHub (ต้องเป็นลิงก์ RAW) และกันกรณีได้ HTML/ว่าง/รูปแบบเพี้ยน
@@ -165,6 +166,13 @@ def process_incident_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
 def save_processed(df: pd.DataFrame, note: str = ""):
     try:
         df.to_parquet(PERSISTED_DATA_PATH, index=False)
+
+        # ✅ เคลียร์ cache ของ parquet เพื่อให้ dashboard ใช้ข้อมูลใหม่ทันที
+        try:
+            load_persisted_data_cached.clear()
+        except Exception:
+            pass
+
         st.success(f"บันทึกข้อมูลสำเร็จ ({len(df):,} แถว) {note}")
     except Exception as e:
         st.error(f"บันทึกข้อมูลล้มเหลว: {e}")
@@ -175,7 +183,31 @@ def save_processed(df: pd.DataFrame, note: str = ""):
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 PERSISTED_DATA_PATH = DATA_DIR / "processed_incident_data.parquet"
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin1234")
+
+
+@st.cache_data(ttl=600, max_entries=1, show_spinner=False)
+def load_persisted_data_cached(path_str: str, modified_time: float) -> pd.DataFrame:
+    """
+    โหลด parquet แบบ cache
+    modified_time ใช้เป็น cache key เพื่อ refresh อัตโนมัติเมื่อไฟล์ถูกบันทึกใหม่
+    """
+    df = pd.read_parquet(path_str)
+
+    if "Occurrence Date" in df.columns:
+        df["Occurrence Date"] = pd.to_datetime(df["Occurrence Date"], errors="coerce")
+
+    return df
+
+
+def load_persisted_data() -> pd.DataFrame:
+    """
+    โหลดข้อมูลหลักจาก parquet โดยไม่อ่านซ้ำทุก rerun
+    """
+    if not PERSISTED_DATA_PATH.exists():
+        return pd.DataFrame()
+
+    modified_time = PERSISTED_DATA_PATH.stat().st_mtime
+    return load_persisted_data_cached(str(PERSISTED_DATA_PATH), modified_time)
 # ==============================================================================
 # PAGE CONFIGURATION
 # ==============================================================================
@@ -1561,6 +1593,12 @@ def display_admin_page():
         use_github = st.button("⬇️ ใช้ไฟล์จาก GitHub (Validate.csv)")
     with c3:
         reset_cache = st.button("🧹 ล้างข้อมูลที่บันทึกไว้")
+    
+    process_upload = st.button(
+        "✅ ประมวลผลและบันทึกไฟล์ที่อัปโหลด",
+        disabled=(uploaded_file is None),
+        use_container_width=True
+    )
 
     # ล้างพาร์เก็ตเก่า (กันการโชว์ข้อมูลเก่า)
     if reset_cache and PERSISTED_DATA_PATH.exists():
@@ -1568,7 +1606,7 @@ def display_admin_page():
         st.success("ล้างไฟล์ข้อมูลที่บันทึกไว้แล้ว (parquet)")
 
     # เส้นทางที่ 1: อัปโหลดไฟล์
-    if uploaded_file:
+    if process_upload and uploaded_file is not None:
         with st.spinner("กำลังอ่านไฟล์ที่อัปโหลด..."):
             try:
                 uploaded_file.seek(0)
@@ -1607,7 +1645,13 @@ def display_admin_page():
     st.info("📎 อัปโหลดไฟล์ .csv หรือกด “ใช้ไฟล์จาก GitHub (Validate.csv)” ด้านบน")
        
 def display_executive_dashboard():
-    log_visit() 
+    # ✅ บันทึก visit แค่ 1 ครั้งต่อ session ไม่ใช่ทุกครั้งที่ Streamlit rerun
+    if "visit_logged" not in st.session_state:
+        try:
+            log_visit()
+        except Exception as e:
+            st.sidebar.caption(f"Analytics log unavailable: {e}")
+        st.session_state.visit_logged = True 
     # --- 1. สร้าง Sidebar และเมนูเลือกหน้า ---
     st.sidebar.markdown(
         f"""<div style="display: flex; align-items: center; margin-bottom: 1rem;"><img src="{LOGO_URL}" style="height: 32px; margin-right: 10px;"><h2 style="margin: 0; font-size: 1.7rem;"><span class="gradient-text">HOIA-RR Menu</span></h2></div>""",
@@ -1748,9 +1792,10 @@ def display_executive_dashboard():
     else:
     # ---------- โหลดข้อมูลหลัก ----------
         try:
-            df = pd.read_parquet(PERSISTED_DATA_PATH)
-            df['Occurrence Date'] = pd.to_datetime(df['Occurrence Date'])
-            st.caption(f"แหล่งข้อมูล: พาร์เก็ตที่บันทึกไว้ • {len(df):,} แถว")
+            df = load_persisted_data()
+        if df.empty:
+            raise FileNotFoundError
+        st.caption(f"แหล่งข้อมูล: พาร์เก็ตที่บันทึกไว้ • {len(df):,} แถว")
         except FileNotFoundError:
             st.warning("ยังไม่มีข้อมูลที่บันทึกไว้ จะพยายามโหลดจาก GitHub (Validate.csv)")
             df_raw = load_csv_from_url_fallback(DEFAULT_CSV_URL)
