@@ -1600,10 +1600,21 @@ def display_admin_page():
         use_container_width=True
     )
 
-    # ล้างพาร์เก็ตเก่า (กันการโชว์ข้อมูลเก่า)
-    if reset_cache and PERSISTED_DATA_PATH.exists():
-        PERSISTED_DATA_PATH.unlink(missing_ok=True)
-        st.success("ล้างไฟล์ข้อมูลที่บันทึกไว้แล้ว (parquet)")
+    # ล้างพาร์เก็ตเก่า + ล้าง Streamlit cache
+    if reset_cache:
+        # 1) ลบไฟล์ parquet เก่าที่บันทึกไว้
+        if PERSISTED_DATA_PATH.exists():
+            PERSISTED_DATA_PATH.unlink(missing_ok=True)
+    
+        # 2) ล้าง cache ของฟังก์ชันโหลด parquet
+        try:
+            load_persisted_data_cached.clear()
+        except Exception:
+            pass
+    
+        # 3) แจ้งผลและ rerun หน้าเว็บ เพื่อไม่ให้ข้อมูลเก่าค้างบนจอ
+        st.success("ล้างไฟล์ข้อมูลที่บันทึกไว้และ cache แล้ว")
+        st.rerun()
 
     # เส้นทางที่ 1: อัปโหลดไฟล์
     if process_upload and uploaded_file is not None:
@@ -1790,27 +1801,37 @@ def display_executive_dashboard():
     #  ✅ ส่วนที่ 2: หน้าที่ต้องโหลดข้อมูล (แดชบอร์ดทั้งหมด)
     # ==============================================================================
     else:
-    # ---------- โหลดข้อมูลหลัก ----------
+        # ---------- โหลดข้อมูลหลัก ----------
         try:
             df = load_persisted_data()
-        if df.empty:
-            raise FileNotFoundError
-        st.caption(f"แหล่งข้อมูล: พาร์เก็ตที่บันทึกไว้ • {len(df):,} แถว")
+    
+            if df.empty:
+                raise FileNotFoundError
+    
+            st.caption(f"แหล่งข้อมูล: พาร์เก็ตที่บันทึกไว้ • {len(df):,} แถว")
+    
         except FileNotFoundError:
             st.warning("ยังไม่มีข้อมูลที่บันทึกไว้ จะพยายามโหลดจาก GitHub (Validate.csv)")
+    
             df_raw = load_csv_from_url_fallback(DEFAULT_CSV_URL)
             if df_raw.empty:
                 st.error("โหลดจาก GitHub ไม่สำเร็จ กรุณาไปหน้า Admin เพื่ออัปโหลด/กดดึงจาก GitHub")
                 return
+    
             df = process_incident_dataframe(df_raw)
             if df.empty:
                 st.error("ประมวลผลไฟล์จาก GitHub ไม่สำเร็จ")
                 return
+    
             # บันทึกไว้เพื่อใช้ครั้งถัดไป
             save_processed(df, note="(auto-fallback)")
             st.caption(f"แหล่งข้อมูล: GitHub RAW (auto-fallback) • {len(df):,} แถว")
-
-    # ========= (ส่วนฟิลเตอร์/แดชบอร์ดเดิม) =========
+    
+        except Exception as e:
+            st.error(f"โหลดข้อมูลไม่สำเร็จ: {e}")
+            return
+    
+        # ========= (ส่วนฟิลเตอร์/แดชบอร์ดเดิม) =========
 
 
         # --- สร้าง Sidebar ส่วนที่ต้องใช้ข้อมูล ---
