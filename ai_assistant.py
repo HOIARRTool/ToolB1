@@ -3,6 +3,7 @@
 # ==============================================================================
 # IMPORT LIBRARIES
 # ==============================================================================
+import os
 import pandas as pd
 import re
 from datetime import datetime
@@ -143,7 +144,101 @@ def build_general_verification_context(incident_description: str) -> str:
     - หากข้อมูลยังไม่ครบ ให้ระบุว่าเป็นข้อมูลที่ควรสอบทานเพิ่ม
     - ให้ใช้ภาษาว่า "อาจพิจารณา", "ข้อมูลเบื้องต้นสนับสนุน", "ยังไม่พบหลักฐานเพียงพอ" แทนการฟันธง
     """
+# ==============================================================================
+# HELPER FUNCTION: GEMINI FALLBACK RESPONSE
+# ==============================================================================
+def get_gemini_fallback_response(prompt: str) -> str:
+    """
+    เรียก Gemini API แบบ fallback
+    - รองรับหลาย API keys จาก Render Environment
+    - รองรับหลาย Gemini models ตามลำดับที่กำหนด
+    - หาก key/model แรก error เช่น quota เต็ม, 429, 403, model unavailable
+      ระบบจะลองตัวถัดไปอัตโนมัติ
+    """
 
+    if not genai:
+        return "ขออภัยครับ ไลบรารี google.generativeai ไม่ได้ถูกติดตั้ง"
+
+    # -----------------------------
+    # 1) API key fallback list
+    # -----------------------------
+    api_keys = [
+        os.getenv("GEMINI_API_KEY"),
+        os.getenv("GEMINI_API_KEY_FALLBACK_1"),
+        os.getenv("GEMINI_API_KEY_FALLBACK_2"),
+        os.getenv("GEMINI_API_KEY_FALLBACK_3"),
+    ]
+
+    api_keys = [key for key in api_keys if key and key.strip()]
+
+    if not api_keys:
+        return (
+            "ไม่พบ GEMINI_API_KEY ใน Environment Variables "
+            "กรุณาตั้งค่า GEMINI_API_KEY ใน Render ก่อนใช้งาน"
+        )
+
+    # -----------------------------
+    # 2) Model fallback list
+    # -----------------------------
+    model_names = [
+        os.getenv("GEMINI_MODEL_PRIMARY", "gemini-2.5-flash"),
+        os.getenv("GEMINI_MODEL_FALLBACK_1", "gemini-2.0-flash"),
+        os.getenv("GEMINI_MODEL_FALLBACK_2", "gemini-2.0-pro"),
+        os.getenv("GEMINI_MODEL_FALLBACK_3", "gemini-2.5-flash"),
+    ]
+
+    # ลบค่าว่าง + ลบ model ซ้ำ โดยยังรักษาลำดับเดิม
+    cleaned_models = []
+    for model_name in model_names:
+        if model_name and model_name.strip() and model_name not in cleaned_models:
+            cleaned_models.append(model_name.strip())
+
+    if not cleaned_models:
+        return "ไม่พบชื่อ Gemini model ที่สามารถใช้งานได้ กรุณาตั้งค่า GEMINI_MODEL_PRIMARY"
+
+    # -----------------------------
+    # 3) Try each API key + each model
+    # -----------------------------
+    errors = []
+
+    for key_index, api_key in enumerate(api_keys, start=1):
+        try:
+            genai.configure(api_key=api_key)
+
+            for model_name in cleaned_models:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content(prompt)
+
+                    if response and hasattr(response, "text") and response.text:
+                        return response.text
+
+                    errors.append(
+                        f"API key #{key_index}, model {model_name}: ไม่มีข้อความตอบกลับ"
+                    )
+
+                except Exception as model_error:
+                    errors.append(
+                        f"API key #{key_index}, model {model_name}: {type(model_error).__name__}: {model_error}"
+                    )
+                    continue
+
+        except Exception as key_error:
+            errors.append(
+                f"API key #{key_index}: {type(key_error).__name__}: {key_error}"
+            )
+            continue
+
+    # -----------------------------
+    # 4) If all fallback failed
+    # -----------------------------
+    recent_errors = "\n".join(f"- {e}" for e in errors[-10:])
+
+    return (
+        "ขออภัยค่ะ ระบบไม่สามารถเชื่อมต่อ Gemini API ได้หลังจากลอง fallback ทั้งหมดแล้ว\n\n"
+        "รายการ error ล่าสุดที่ตรวจพบ:\n"
+        f"{recent_errors}"
+    )
 def get_consultation_response(incident_description: str) -> str:
     """
     สร้าง Prompt ที่มี Knowledge Base ในตัว และเรียก Gemini API
@@ -1257,9 +1352,4 @@ def get_consultation_response(incident_description: str) -> str:
     หากค้นหาแล้ว ไม่พบข้อมูล ใน "เป้าหมายที่เกี่ยวข้อง" เลย (array ว่าง) ให้แสดงข้อความว่า: "สำหรับอุบัติการณ์นี้ ไม่พบเป้าหมายความปลอดภัยที่เกี่ยวข้องโดยตรงในฐานข้อมูล 3P Safety ควรพิจารณาตามบริบทขององค์กรและมาตรฐานวิชาชีพที่เกี่ยวข้อง"
     """
 
-    try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        response = model.generate_content(master_prompt)
-        return response.text
-    except Exception as e:
-        return f"ขออภัยครับ เกิดข้อผิดพลาดในการเชื่อมต่อกับ AI: {e}"
+    return get_gemini_fallback_response(master_prompt)
