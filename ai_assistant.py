@@ -17,6 +17,133 @@ except ImportError:
 # ==============================================================================
 # AI FUNCTION 2: CASE CONSULTATION
 # ==============================================================================
+def build_general_verification_context(incident_description: str) -> str:
+    """
+    สร้างบริบทตรวจสอบข้อมูลเบื้องต้นสำหรับอุบัติการณ์ทุกประเภท
+    เพื่อช่วยให้ AI แยกข้อเท็จจริง กระบวนการที่ตรวจแล้ว ประเภทเหตุการณ์ และข้อมูลที่ยังขาด
+    ก่อนตีความหรือให้รหัส NRLS/HRMS
+    """
+    text = incident_description.lower()
+
+    domains = {
+        "Medication / Drug-related": [
+            "ยา", "drug", "medication", "แพ้ยา", "adr", "ade", "dose", "โดส",
+            "ฉีด", "ให้ยา", "dispense", "prescribe", "hyoscine", "antibiotic"
+        ],
+        "Patient Identification": [
+            "ผิดคน", "ระบุตัวตน", "hn", "ชื่อสกุล", "patient identification",
+            "wrong patient", "สลับคน"
+        ],
+        "Diagnosis / Assessment / Treatment delay": [
+            "วินิจฉัย", "diagnosis", "missed", "delay", "ล่าช้า", "ประเมิน",
+            "assessment", "fast track", "triage", "under triage", "over triage"
+        ],
+        "Procedure / Surgery / Anesthesia": [
+            "ผ่าตัด", "หัตถการ", "procedure", "surgery", "anesthesia", "ระงับความรู้สึก",
+            "bleeding", "pneumothorax", "complication"
+        ],
+        "Laboratory / Radiology / Diagnostic test": [
+            "lab", "ห้องปฏิบัติการ", "ผลตรวจ", "critical", "xray", "ct", "mri",
+            "รังสี", "สิ่งส่งตรวจ", "specimen"
+        ],
+        "Infection Prevention and Control": [
+            "ติดเชื้อ", "infection", "cauti", "vap", "clabsi", "ssi", "ล้างมือ",
+            "isolation", "แพร่กระจายเชื้อ"
+        ],
+        "Communication / Handoff / Documentation": [
+            "สื่อสาร", "ส่งต่อข้อมูล", "handoff", "เวชระเบียน", "บันทึก",
+            "documentation", "ไม่รายงาน", "รายงานล่าช้า"
+        ],
+        "Equipment / Device / IT system": [
+            "เครื่องมือ", "อุปกรณ์", "device", "infusion pump", "ระบบล่ม",
+            "his", "lis", "software", "network", "คอมพิวเตอร์"
+        ],
+        "Environment / Facility / Security": [
+            "สิ่งแวดล้อม", "อาคาร", "น้ำ", "ไฟฟ้า", "ลิฟต์", "ห้องน้ำ",
+            "ความปลอดภัย", "ทรัพย์สิน", "ขโมย", "ทำร้าย", "อาละวาด"
+        ],
+        "Referral / Transfer / Continuity of Care": [
+            "ส่งต่อ", "refer", "transfer", "รถพยาบาล", "ambulance",
+            "continuity", "จำหน่าย", "กลับมา er", "readmission"
+        ],
+        "Complaint / Legal / Reputation": [
+            "ร้องเรียน", "ฟ้อง", "คดี", "สื่อ", "social", "ดราม่า", "เสียชื่อเสียง"
+        ],
+        "Privacy / Cybersecurity / Data": [
+            "ข้อมูลส่วนบุคคล", "privacy", "pdpa", "ข้อมูลรั่ว", "cyber",
+            "confidentiality", "integrity", "availability"
+        ],
+        "Blood Transfusion": [
+            "เลือด", "transfusion", "blood", "ส่วนประกอบของเลือด", "ให้เลือด"
+        ],
+        "Fall / Pressure injury / Patient harm": [
+            "ตกเตียง", "fall", "แผลกดทับ", "pressure injury", "บาดเจ็บ"
+        ]
+    }
+
+    process_checks = {
+        "มีการระบุว่าตรวจสอบแล้ว": [
+            "ตรวจสอบแล้ว", "reviewed", "confirmed", "verified"
+        ],
+        "ไม่มีประวัติเสี่ยงเดิม": [
+            "ไม่มีประวัติ", "ไม่พบประวัติ", "no history", "nka"
+        ],
+        "ทำถูกคน": [
+            "ถูกคน", "right patient", "ยืนยันตัวตน", "identify"
+        ],
+        "ทำถูกชนิด/ถูกคำสั่ง": [
+            "ถูกยา", "ถูกชนิด", "ถูกคำสั่ง", "right drug", "right procedure", "right test"
+        ],
+        "ทำถูกขนาด/ถูกวิธี/ถูกเวลา": [
+            "ถูกโดส", "ถูกขนาด", "ถูกวิธี", "ถูกเวลา", "right dose", "right route", "right time"
+        ],
+        "มีการเฝ้าระวังหรือติดตามหลังทำ": [
+            "observe", "เฝ้าระวัง", "ติดตามอาการ", "monitor", "follow up"
+        ],
+        "มีอาการหรือผลลัพธ์ไม่พึงประสงค์หลังเหตุการณ์": [
+            "หลัง", "กลับมา", "อาการ", "ผื่น", "คัน", "ปวด", "เสียชีวิต", "บาดเจ็บ",
+            "ทรุด", "complication", "adverse", "harm"
+        ],
+        "มีความล่าช้า": [
+            "delay", "ล่าช้า", "รอนาน", "ไม่ทัน", "เกินเวลา"
+        ],
+        "มีข้อมูลการสื่อสารหรือส่งต่อ": [
+            "แจ้ง", "รายงาน", "สื่อสาร", "ส่งต่อ", "handoff", "refer"
+        ]
+    }
+
+    detected_domains = [
+        domain for domain, keywords in domains.items()
+        if any(keyword in text for keyword in keywords)
+    ]
+
+    detected_checks = [
+        check for check, keywords in process_checks.items()
+        if any(keyword in text for keyword in keywords)
+    ]
+
+    if not detected_domains:
+        detected_domains = ["ยังไม่สามารถระบุ domain ได้ชัดเจนจาก keyword ควรให้ AI พิจารณาจากบริบท"]
+
+    if not detected_checks:
+        detected_checks = ["ยังไม่พบข้อความที่บ่งชี้ว่ามีการตรวจสอบกระบวนการใดชัดเจน"]
+
+    return f"""
+    [บริบทตรวจสอบข้อมูลเบื้องต้นจากระบบ]
+
+    กลุ่มเหตุการณ์ที่ตรวจพบจาก keyword:
+    {chr(10).join(f"- {item}" for item in detected_domains)}
+
+    ข้อมูลหรือกระบวนการที่พบว่ามีการกล่าวถึง:
+    {chr(10).join(f"- {item}" for item in detected_checks)}
+
+    คำเตือนสำหรับ AI:
+    - อย่าสรุปว่าเป็นความผิดพลาดของบุคคลหรือกระบวนการทันที
+    - ให้แยก "process error" ออกจาก "adverse outcome / complication / disease progression / patient factor"
+    - หากข้อมูลยังไม่ครบ ให้ระบุว่าเป็นข้อมูลที่ควรสอบทานเพิ่ม
+    - ให้ใช้ภาษาว่า "อาจพิจารณา", "ข้อมูลเบื้องต้นสนับสนุน", "ยังไม่พบหลักฐานเพียงพอ" แทนการฟันธง
+    """
+
 def get_consultation_response(incident_description: str) -> str:
     """
     สร้าง Prompt ที่มี Knowledge Base ในตัว และเรียก Gemini API
@@ -24,6 +151,7 @@ def get_consultation_response(incident_description: str) -> str:
     """
     if not genai:
         return "ขออภัยครับ ไลบรารี google.generativeai ไม่ได้ถูกติดตั้ง"
+    verification_context = build_general_verification_context(incident_description)
 
     # --- Master Prompt พร้อมฐานข้อมูลความรู้ในตัว (เวอร์ชันอัปเดต) ---
     master_prompt = f"""
@@ -37,6 +165,55 @@ def get_consultation_response(incident_description: str) -> str:
     **ข้อห้าม:**
     - ห้ามให้คำตอบที่เด็ดขาด ฟันธง หรือรับประกันความถูกต้อง 100%
     - ห้ามใช้ตำแหน่งที่สูงกว่าผู้ใช้งาน เช่น "ผู้จัดการ" หรือ "ผู้เชี่ยวชาญ"
+    **บริบทตรวจสอบข้อมูลเบื้องต้นจากระบบ:**
+    {verification_context}
+    หากมีข้อมูลว่ากระบวนการบางส่วนได้รับการตรวจสอบแล้วว่าเป็นไปตามแนวทาง 
+    ให้ AI ต้องระบุส่วนที่ตรวจสอบแล้วอย่างชัดเจนก่อนตีความเหตุการณ์ 
+    และห้ามเหมารวมว่าเป็นความผิดพลาดของกระบวนการทั้งหมด
+    
+    หากยังเกิดผลลัพธ์ไม่พึงประสงค์แม้กระบวนการที่ตรวจสอบแล้วถูกต้อง 
+    ให้พิจารณาความเป็นไปได้ของ adverse event, complication, disease progression, patient-specific factor, environmental factor, communication gap หรือ system limitation ตามบริบท
+    
+    ให้สรุปด้วยภาษาที่สมดุล เช่น 
+    "ข้อมูลเบื้องต้นยังไม่สนับสนุนว่าเป็น process error ในขั้นตอนที่ตรวจสอบแล้ว 
+    แต่อุบัติการณ์นี้ยังควรถูกทบทวนในฐานะเหตุการณ์ไม่พึงประสงค์/ความเสี่ยงที่ต้องประเมินสาเหตุเพิ่มเติม"
+
+    **หลักการตรวจสอบข้อมูลก่อนตีความอุบัติการณ์:**
+    ก่อนให้รหัสอุบัติการณ์ ประเมินความรุนแรง วิเคราะห์ปัจจัยร่วม หรือเสนอแนวทางแก้ไข
+    ให้ตรวจสอบข้อมูลเบื้องต้นก่อนเสมอ โดยต้องแยกให้ชัดเจนระหว่าง
+    1. ข้อเท็จจริงที่ระบุไว้ในรายละเอียดอุบัติการณ์
+    2. กระบวนการที่ได้รับการตรวจสอบแล้วว่าทำถูกต้องหรือครบถ้วน
+    3. ผลลัพธ์หรืออันตรายที่เกิดขึ้นจริง
+    4. การตีความเบื้องต้นของ AI
+    5. ข้อมูลที่ยังไม่ครบถ้วนและต้องให้ทีมมนุษย์ตรวจสอบเพิ่มเติม
+
+    ห้ามสรุปว่าเป็นความผิดพลาดของบุคคลหรือกระบวนการทันที
+    หากข้อมูลยังไม่เพียงพอ ให้ใช้คำว่า "ยังไม่พบข้อมูลสนับสนุนเพียงพอ", "ควรสอบทานเพิ่มเติม", 
+    "อาจพิจารณาเป็น", หรือ "เป็นไปได้ว่า" แทนการฟันธง
+
+    ให้ AI ตรวจสอบว่าเหตุการณ์อาจอยู่ในกลุ่มใดต่อไปนี้:
+    - Medication process issue เช่น prescribing, transcribing, dispensing, administration
+    - Adverse drug reaction หรือ adverse event ที่ไม่ได้เกิดจาก medication error
+    - Patient identification issue
+    - Clinical assessment / diagnosis / treatment delay
+    - Procedure or surgery-related complication
+    - Laboratory / radiology / diagnostic process issue
+    - Infection prevention and control issue
+    - Communication / handoff / documentation issue
+    - Equipment / device / technology issue
+    - Environment / facility / security issue
+    - Referral / transfer / continuity of care issue
+    - Patient behavior / clinical condition / disease progression
+    - Complaint / legal / reputational issue
+    - IT / privacy / data security issue
+    - Blood transfusion process or transfusion reaction
+
+    หากพบว่ากระบวนการหลักถูกต้องแล้ว แต่ยังเกิดผลลัพธ์ไม่พึงประสงค์
+    ให้ระบุอย่างระมัดระวังว่า "ข้อมูลเบื้องต้นยังไม่สนับสนุนว่าเป็น process error ในขั้นตอนที่ตรวจสอบแล้ว
+    แต่อาจเป็น adverse event, complication, disease progression, patient factor หรือบริบทอื่นที่ควรทบทวนต่อ"
+
+    ทุกครั้งต้องแสดงหัวข้อ:
+    "0. การตรวจสอบข้อมูลและแยกประเภทเหตุการณ์เบื้องต้น"
     
     **ภารกิจ:**
     จาก "รายละเอียดอุบัติการณ์" ที่ผู้ใช้ป้อนเข้ามา จงวิเคราะห์และให้คำปรึกษาที่ครบถ้วนตามรูปแบบที่กำหนด โดยอ้างอิงจาก "ฐานข้อมูลความรู้" ที่ให้มาเท่านั้น
@@ -1028,6 +1205,23 @@ def get_consultation_response(incident_description: str) -> str:
 
     **คำสั่ง:**
     จงวิเคราะห์รายละเอียดอุบัติการณ์ แล้วให้คำปรึกษาตามหัวข้อและรูปแบบ Markdown ต่อไปนี้อย่างเคร่งครัด:
+    ### 0. การตรวจสอบข้อมูลและแยกประเภทเหตุการณ์เบื้องต้น
+    **ข้อมูลที่ตรวจสอบได้จากรายละเอียดอุบัติการณ์**
+    - ...
+
+    **กระบวนการที่ระบุว่าทำถูกต้อง/ตรวจสอบแล้ว**
+    - ...
+
+    **ข้อมูลที่ยังไม่ครบถ้วนหรือควรสอบทานเพิ่มเติม**
+    - ...
+
+    **การแยกประเภทเหตุการณ์เบื้องต้น**
+    - เหตุการณ์นี้อาจเข้ากลุ่ม: ...
+    - ยังไม่ควรสรุปว่าเป็น: ...
+    - เหตุผล: ...
+
+    **ข้อควรระวังในการตีความ**
+    - ...
     ### 1. สรุปเหตุการณ์และประเด็นความเสี่ยงสำคัญ
     (จงสรุปเหตุการณ์โดย **ดึง Keyword ที่สอดคล้องกับรหัสความเสี่ยง** ออกมาเน้นย้ำ เขียนในลักษณะการจับประเด็นว่า "เกิดอะไรที่ไม่พึงประสงค์ขึ้นบ้าง" 
     เพื่อเป็นการปูทางไปสู่การให้รหัสในหัวข้อถัดไป เช่น แทนที่จะเล่าเรื่องเฉยๆ ให้ระบุว่า "ผู้ป่วยเกิดภาวะ [ชื่อภาวะ] ซึ่งนำไปสู่การ [ชื่อหัตถการฉุกเฉิน/ความผิดพลาด]" เป็นต้น)
