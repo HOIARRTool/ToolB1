@@ -6,7 +6,12 @@ import streamlit as st
 import os
 st.set_page_config(layout="wide") 
 from tqdm import tqdm
-from anonymizer import load_ner_model, anonymize_column
+from anonymizer import (
+    load_ner_model,
+    anonymize_column,
+    redact_hn_dataframe,
+    residual_hn_locations,
+)
 import streamlit as st
 import os # Make sure os is imported
 import pandas as pd
@@ -165,7 +170,40 @@ def process_incident_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
 
 def save_processed(df: pd.DataFrame, note: str = ""):
     try:
-        df.to_parquet(PERSISTED_DATA_PATH, index=False)
+        # ==========================================================
+        # PRIVACY GATE: ปิด HN ในทุก text column ก่อนบันทึก
+        # ==========================================================
+        df_safe = redact_hn_dataframe(df)
+
+        # ไม่เก็บรายละเอียดการเกิดฉบับ RAW ใน persisted parquet
+        if "รายละเอียดการเกิด" in df_safe.columns:
+            df_safe = df_safe.drop(columns=["รายละเอียดการเกิด"])
+
+        # ตรวจซ้ำก่อน save
+        residual_hits = residual_hn_locations(df_safe)
+
+        if residual_hits:
+            st.error(
+                f"❌ Privacy check failed: ยังพบ HN "
+                f"{len(residual_hits)} ตำแหน่ง ระบบจะไม่บันทึกข้อมูล"
+            )
+            return False
+
+        df_safe.to_parquet(PERSISTED_DATA_PATH, index=False)
+
+        try:
+            load_persisted_data_cached.clear()
+        except Exception:
+            pass
+
+        st.success(
+            f"บันทึกข้อมูลสำเร็จ ({len(df_safe):,} แถว) {note}"
+        )
+        return True
+
+    except Exception as e:
+        st.error(f"บันทึกข้อมูลล้มเหลว: {e}")
+        return False
 
         # ✅ เคลียร์ cache ของ parquet เพื่อให้ dashboard ใช้ข้อมูลใหม่ทันที
         try:
@@ -200,14 +238,36 @@ def load_persisted_data_cached(path_str: str, modified_time: float) -> pd.DataFr
 
 
 def load_persisted_data() -> pd.DataFrame:
-    """
-    โหลดข้อมูลหลักจาก parquet โดยไม่อ่านซ้ำทุก rerun
-    """
     if not PERSISTED_DATA_PATH.exists():
         return pd.DataFrame()
 
     modified_time = PERSISTED_DATA_PATH.stat().st_mtime
-    return load_persisted_data_cached(str(PERSISTED_DATA_PATH), modified_time)
+
+    df = load_persisted_data_cached(
+        str(PERSISTED_DATA_PATH),
+        modified_time
+    )
+
+    # ==========================================================
+    # SAFETY NET สำหรับ parquet รุ่นเก่า
+    # ==========================================================
+    df = redact_hn_dataframe(df)
+
+    # ไม่อนุญาตให้ raw narrative เดินเข้าสู่ dashboard
+    if "รายละเอียดการเกิด" in df.columns:
+        df = df.drop(columns=["รายละเอียดการเกิด"])
+
+    residual_hits = residual_hn_locations(df)
+
+    if residual_hits:
+        st.error(
+            "❌ Privacy protection stopped the dashboard: "
+            "ยังพบ HN ในข้อมูลที่บันทึกไว้ กรุณาไปหน้า Admin "
+            "เพื่อล้างข้อมูลและประมวลผลใหม่"
+        )
+        return pd.DataFrame()
+
+    return df
 # ==============================================================================
 # PAGE CONFIGURATION
 # ==============================================================================
@@ -1440,24 +1500,36 @@ def process_incident_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     else:
         df['หมวดหมู่มาตรฐานสำคัญ'] = "ไม่สามารถระบุ (PSG9code.xlsx ไม่ได้โหลด)"
 
-    # ---------------- Anonymize + เก็บตก HN ----------------
+    # ---------------- Anonymize ----------------
     try:
         ner_model = load_ner_model()
+    
         df = anonymize_column(
-            df, text_col="รายละเอียดการเกิด", ner_model=ner_model, out_col="รายละเอียดการเกิด_Anonymized"
+            df,
+            text_col="รายละเอียดการเกิด",
+            ner_model=ner_model,
+            out_col="รายละเอียดการเกิด_Anonymized"
         )
-        if 'รายละเอียดการเกิด_Anonymized' in df.columns:
-            df['รายละเอียดการเกิด_Anonymized'] = df['รายละเอียดการเกิด_Anonymized'].astype(str).apply(
-                lambda x: re.sub(r'HN\s*[:.\-#]?\s*\d+', '[HN_REDACTED]', x, flags=re.IGNORECASE)
+    
+        # Defense-in-depth:
+        # ปิด HN ที่อาจอยู่ใน text column อื่นด้วย
+        df = redact_hn_dataframe(df)
+    
+        # ตรวจ privacy หลัง anonymization
+        residual_hits = residual_hn_locations(df)
+    
+        if residual_hits:
+            st.error(
+                f"❌ Privacy check failed: "
+                f"ยังพบ HN {len(residual_hits)} ตำแหน่ง"
             )
+            return pd.DataFrame()
+    
     except Exception as e:
-        try:
-            st = __import__("streamlit")
-            st.warning(f"ไม่สามารถทำการ anonymize ได้ครบถ้วน: {e}")
-        except Exception:
-            pass
-
-    return df
+        st.error(
+            f"❌ การปกปิดข้อมูลส่วนบุคคลไม่สำเร็จ: {e}"
+        )
+        return pd.DataFrame()
 
 
     # ---------------- ตรวจคอลัมน์จำเป็น ----------------
